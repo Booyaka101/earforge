@@ -26,7 +26,13 @@ No paid anything. Model weights gated-free (HF license acceptance + free token, 
 
 ## Verified working (real, not stubs)
 
-- `pytest -q`: 50 passed, 1 skipped (the gpu-marked test, which needs EARFORGE_GPU=1 + HF_TOKEN + CUDA).
+**The real-model acceptance run happened (2026-10-06, after the owner pointed at the machine's HF token).** The token was already on the PC at `D:\hf-cache\token` (user env `HF_HOME=D:\hf-cache`, set up for earlier CivitAI/video-pipeline work); only the MuScriptor license acceptance was missing, done as a one-click form submit from the owner's logged-in HF session. With it:
+
+- `EARFORGE_GPU=1 pytest -m gpu` -> **1 passed in 17.4 s**: real TranscriptionModel on the 4090, real click+scale wav, >=1 instrument, monotonic times, MThd.
+- Real browser transcription of the 24 s demo MP3: ~11 s wall time, lanes `electric_bass / drums / acoustic_guitar`, 161 notes, tempo detected 100.036 BPM against a ground truth of 100. Playback, bass solo, stems, and all four export endpoints 200. Zero console exceptions. docs/demo.gif (the README hero), docs/10-real-transcription.png and docs/11-real-solo.png are from this run.
+- The offline claim holds by construction: weights and soundfont are now in `D:\hf-cache` and every later run loads from disk.
+
+`pytest -q`: 63 passed + 1 gpu (the gpu test now also passes when run with a token; it stays auto-skipped without one).
 - Real ffmpeg conversion (stereo 44.1k wav and a 320 kbps mp3 to 32 kHz mono), corrupt-input and missing-ffmpeg error paths.
 - Real fluidsynth stem rendering through the really-downloaded MuseScore_General.sf2 (215 MB, from the ungated MuScriptor/assets HF repo), including the half-speed re-render being twice as long.
 - Server integration (stub model over the real FastAPI app): SSE pairing invariant, progress, tempo-fallback banner, cancel mid-run, instrument masking + abbreviation/ambiguity errors, model switch, exports (MThd MIDI, ndjson), library CRUD, delete-running refused, 503s with install hints, empty upload.
@@ -46,10 +52,8 @@ Third review loop (loop 3): a startup sweep now re-marks jobs orphaned as "runni
 ## Next steps for the owner (acceptance run, from the phone)
 
 1. Create the GitHub repo (Booyaka101/earforge), push, then `pip install -e .` anywhere or `twine upload dist/earforge-0.1.0-py3-none-any.whl` (the wheel in dist/ is current).
-2. One-time: accept the license at https://huggingface.co/MuScriptor/muscriptor-medium (granted automatically), create a read token, `setx HF_TOKEN hf_...`, reopen the terminal.
-3. On the CUDA venv: `pip install earforge` + `pip install torch --force-reinstall --index-url https://download.pytorch.org/whl/cu128`, run `earforge`, drop a real 3-minute song, confirm >=2 lanes, solo/mute/loop/tempo, then with network unplugged repeat (model and soundfont are cached by then).
-4. `EARFORGE_GPU=1 pytest -m gpu` for the real-model integration test.
-5. Optional: record docs/demo.gif of a real transcription and swap the hero image.
+2. The HF setup is DONE on this machine: token at `D:\hf-cache\token` (HF_HOME points there) and the muscriptor-medium license is accepted. If `large` is ever wanted, one more acceptance click on its model page.
+3. Optional polish: a 3-minute real song run for the README's second example, and the sheets export once MuseScore 4 is installed.
 
 ## Feature candidates for the next release (not in v1, deliberate)
 

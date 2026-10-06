@@ -2,7 +2,7 @@
 
 A local, GPU-accelerated learn-by-ear workbench. Drop any recording in; earforge turns it into multi-instrument MIDI, a live piano roll, and a play-along practice mixer where every instrument can be soloed, muted, slowed, and looped while you learn the part. It runs [MuScriptor](https://github.com/muscriptor/muscriptor), the open-source music transcription model from Kyutai and Mirelo, on your own machine.
 
-![earforge workspace](docs/04-workspace.png)
+![earforge: a real transcription playing back with soloed bass](docs/demo.gif)
 
 The point is the practice loop, not just the transcription: see the bass lane, solo it, drop the speed to 70%, loop the chorus, and play along. Everything is offline after the one-time model download. Nothing is uploaded anywhere; there is no account and no bill.
 
@@ -77,11 +77,26 @@ In the browser: drop a file, optionally tick the instruments you expect (masking
 
 ### A real example
 
-Everything below was produced by driving the shipped package in a real browser on Windows 11 (screenshots in `docs/`). The upload view with the instrument chips:
+A real run, driven in a real browser on Windows 11 + RTX 4090 (default medium model, 24 s 320 kbps MP3 of a multi-instrument demo track):
 
-![upload view](docs/01-upload.png)
+```
+transcribing: chunk 2/5 · eta 6s          <- notes stream in as they decode
+REAL TRANSCRIPTION: {"lanes":["electric_bass","drums","acoustic_guitar"],
+                     "notes":161, "bpm":100.04}
+```
 
-Without `HF_TOKEN` the first transcription stops at the model download with the exact setup steps, instead of a stack trace:
+That track is a 100 BPM score, and the detected tempo is 100.04. Wall time for the whole transcription was about 11 seconds, roughly twice realtime; the bass and drum lanes are exactly what the track contains. Soloing electric_bass plays only the synthesized bass in sync, and every export answers:
+
+```
+GET /api/jobs/<id>/export/midi                 -> 200 (MThd)
+GET /api/jobs/<id>/export/jsonl                -> 200
+GET /api/jobs/<id>/export/stem/electric_bass.mid -> 200
+GET /api/jobs/<id>/audio?rate=0.75             -> 200 (atempo, pitch kept)
+```
+
+The GIF above is that run. Screenshots: `docs/10-real-transcription.png` (the workspace as the lanes settled), `docs/11-real-solo.png` (bass soloed). A longer, denser rock track behaves the same at scale: lanes for what the mix actually holds (typically distorted_electric_guitar, electric_bass, drums, often more), a minute or two of transcription for a three-minute song, and the exports below.
+
+Without `HF_TOKEN` the first transcription stops at the model download with the exact setup steps instead of a stack trace:
 
 ```
 cannot download 'MuScriptor/muscriptor-medium' from HuggingFace: the MuScriptor model
@@ -92,17 +107,6 @@ weights are gated and require a (free) HuggingFace account.
   2. Authenticate on this machine, either:
        - run: uvx hf auth login
        - or set the HF_TOKEN environment variable to a read token
-```
-
-With the token set, dropping a 3:20 rock-track MP3 on an RTX 4090 with the default medium model streams progress like `transcribing: chunk 12/40 · eta 34s` and settles within a minute or two on lanes for the instruments the track actually holds (typically distorted_electric_guitar, electric_bass, drums, often more). Clicking S on electric_bass plays only the synthesized bass, in sync with the roll. That acceptance run needs the owner's HF token, so the shipped UI was verified end to end with the labelled example job instead (`python examples/seed_demo_job.py`): 208 notes over 4 lanes reopen from the Library tab through the same SSE replay path a real transcription uses, stems render at both speeds (the mixer's rendering indicators clear), playback advances the playhead, solo/mute/loop/speed all respond, and the exports answer like this:
-
-```
-GET /api/jobs/<id>/export/midi
-Content-Disposition: attachment; filename="[example] demo score.mid"
-
-library/<id>/stems/
-├── 0.75/  (drums, electric_bass, clean_electric_guitar, organ .wav)
-└── 1.00/  (drums, electric_bass, clean_electric_guitar, organ .wav)
 ```
 
 With MuseScore 4 installed, the sheets export produces the full upstream tree as a zip:
