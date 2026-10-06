@@ -1,0 +1,19 @@
+# virtualenvs and build output
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# bundled dev/test binaries (ffmpeg, fluidsynth) are not redistributable here
+tools/
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# local scratch
+*.log
+.e2e/
+.clean-install/

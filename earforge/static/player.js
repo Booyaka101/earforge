@@ -1,0 +1,219 @@
+/* Play-along mixer: original audio + per-instrument stems, solo/mute/gain,
+   A/B loop, and 50-100% speed. All public times are RAW seconds (the
+   transcription's own timeline); the stretched math stays internal.
+
+   Speed works differently per source on purpose. Stems are pre-rendered at
+   the chosen rate server-side (note times scaled, pitches untouched). The
+   original recording uses playbackRate, so it drops in pitch at slow speeds
+   like a slowed tape. */
+(function (global) {
+  "use strict";
+
+  /* Pure function, unit-tested: the gain a channel gets given every
+     channel's {gain, mute, solo}. Any solo solos everything else out. */
+  function effectiveGain(channels, id) {
+    var me = channels[id];
+    if (!me) return 0;
+    var anySolo = false;
+    for (var k in channels) if (channels[k].solo) { anySolo = true; break; }
+    if (anySolo) return me.solo ? me.gain : 0;
+    return me.mute ? 0 : me.gain;
+  }
+
+  function Player() {
+    this.ctx = null;
+    this.master = null;
+    this.buffers = {};        /* id -> AudioBuffer; stems are rendered at this.rate */
+    this.gains = {};          /* id -> GainNode */
+    this.channels = {};       /* id -> {gain, mute, solo} */
+    this.rate = 1;
+    this.duration = 0;        /* raw seconds */
+    this.loop = null;         /* raw seconds {a,b} */
+    this.playing = false;
+    this.anchorCtxTime = 0;   /* ctx time when the current take started */
+    this.anchorPos = 0;       /* raw position of the take start */
+    this.live = [];           /* sources of the current+next take */
+    this.nextTake = null;     /* {atCtx, fromRaw} scheduled ahead for looping */
+    this.timer = null;
+    this.onEnd = null;
+    this.onSourcesStopped = null;
+  }
+
+  Player.prototype._ensureCtx = function () {
+    if (!this.ctx) {
+      var AC = global.AudioContext || global.webkitAudioContext;
+      this.ctx = new AC();
+      this.master = this.ctx.createGain();
+      this.master.connect(this.ctx.destination);
+    }
+    if (this.ctx.state === "suspended") this.ctx.resume();
+  };
+
+  Player.prototype.setChannels = function (channels) {
+    /* channels: {id: {gain, mute, solo}}; call before/after setBuffers */
+    this.channels = channels;
+    this._ensureCtx();
+    for (var id in channels) {
+      if (!this.gains[id]) {
+        this.gains[id] = this.ctx.createGain();
+        this.gains[id].connect(this.master);
+      }
+      this.gains[id].gain.value = effectiveGain(channels, id);
+    }
+  };
+
+  Player.prototype.updateGains = function () {
+    for (var id in this.channels) {
+      if (this.gains[id]) this.gains[id].gain.value = effectiveGain(this.channels, id);
+    }
+  };
+
+  Player.prototype.setBuffers = function (buffers, duration, rate) {
+    /* buffers: {id: AudioBuffer}; stems must be rendered at `rate`,
+       the original at 1.0 (playbackRate handles its speed). */
+    var wasPlaying = this.playing;
+    var pos = this.position();
+    this.pause();
+    this.buffers = buffers;
+    this.duration = duration;
+    this.rate = rate;
+    if (wasPlaying) { this.seek(pos); this.play(); }
+  };
+
+  Player.prototype._stretchedDuration = function () {
+    return this.duration / this.rate;
+  };
+
+  Player.prototype._startTake = function (atCtx, fromRaw, spanRaw) {
+    /* spanRaw: raw seconds this take covers before the loop point/end */
+    for (var id in this.buffers) {
+      var buf = this.buffers[id];
+      var src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(this.gains[id]);
+      if (id === "original") {
+        src.playbackRate.value = this.rate;
+        var off = Math.min(fromRaw, Math.max(0, buf.duration / this.rate - 0.01));
+        src.start(atCtx, off);
+      } else {
+        var soff = Math.min(fromRaw / this.rate, Math.max(0, buf.duration - 0.01));
+        src.start(atCtx, soff);
+      }
+      var stopAt = atCtx + spanRaw / this.rate;
+      src.stop(stopAt);
+      this.live.push({ src: src, stopAt: stopAt });
+    }
+    this.anchorCtxTime = atCtx;
+    this.anchorPos = fromRaw;
+  };
+
+  Player.prototype._cleanupLive = function () {
+    this.live.forEach(function (entry) {
+      try { entry.src.stop(); } catch (e) { /* already stopped */ }
+      try { entry.src.disconnect(); } catch (e) { /* fine */ }
+    });
+    this.live = [];
+    this.nextTake = null;
+  };
+
+  Player.prototype.play = function () {
+    if (this.playing || !this.buffers.original && !Object.keys(this.buffers).length) return;
+    this._ensureCtx();
+    this.playing = true;
+    var pos = this.position();
+    if (pos >= this.duration - 0.05) pos = this.loop ? this.loop.a : 0;
+    this._scheduleTake(this.ctx.currentTime + 0.02, pos);
+    this._startScheduler();
+  };
+
+  Player.prototype._scheduleTake = function (atCtx, fromRaw) {
+    var endRaw = this.loop ? Math.min(this.loop.b, this.duration) : this.duration;
+    var spanRaw = Math.max(0.02, endRaw - fromRaw);
+    this._startTake(atCtx, fromRaw, spanRaw);
+    var nextAt = atCtx + spanRaw / this.rate;
+    if (this.loop && this.loop.b <= this.duration) {
+      this.nextTake = { atCtx: nextAt, fromRaw: this.loop.a };
+    } else {
+      var self = this;
+      var stopWatch = function () {
+        if (!self.playing) return;
+        if (self.ctx.currentTime >= nextAt - 0.03) {
+          self.pause();
+          self.anchorPos = 0;
+          self.anchorCtxTime = 0;
+          if (self.onEnd) self.onEnd();
+          return;
+        }
+        self._stopTimer = global.setTimeout(stopWatch, 40);
+      };
+      stopWatch();
+    }
+  };
+
+  Player.prototype._startScheduler = function () {
+    var self = this;
+    if (this.timer) global.clearInterval(this.timer);
+    this.timer = global.setInterval(function () {
+      if (!self.playing || !self.nextTake) return;
+      if (self.nextTake.atCtx <= self.ctx.currentTime + 0.45) {
+        var nt = self.nextTake;
+        self.nextTake = null;
+        self._cleanupLive();
+        self._scheduleTake(nt.atCtx, nt.fromRaw);
+      }
+    }, 150);
+  };
+
+  Player.prototype.pause = function () {
+    if (!this.playing) return;
+    this.anchorPos = this.position();
+    this.playing = false;
+    if (this.timer) { global.clearInterval(this.timer); this.timer = null; }
+    if (this._stopTimer) { global.clearTimeout(this._stopTimer); this._stopTimer = null; }
+    this._cleanupLive();
+  };
+
+  Player.prototype.position = function () {
+    /* raw seconds; frozen at the anchor while paused */
+    if (!this.playing) return this.anchorPos;
+    var stretched = this.anchorPos / this.rate +
+      (this.ctx.currentTime - this.anchorCtxTime);
+    return Math.min(stretched * this.rate, this.duration);
+  };
+
+  Player.prototype.seek = function (raw) {
+    var wasPlaying = this.playing;
+    this.pause();
+    this.anchorPos = Math.max(0, Math.min(raw, this.duration));
+    if (wasPlaying) this.play();
+  };
+
+  Player.prototype.setLoop = function (loop) {
+    /* raw seconds {a,b} or null; live-safe */
+    this.loop = loop;
+    if (this.playing) {
+      var pos = this.position();
+      this.pause();
+      this.seek(pos);
+      this.play();
+    }
+  };
+
+  Player.prototype.setRate = function (rate, buffersAtRate) {
+    /* buffersAtRate: replacement stem buffers rendered at `rate`
+       (original unchanged). Re-anchors at the current raw position. */
+    var pos = this.position();
+    var wasPlaying = this.playing;
+    this.pause();
+    this.rate = rate;
+    for (var id in buffersAtRate) this.buffers[id] = buffersAtRate[id];
+    this.anchorPos = Math.min(pos, this.duration);
+    if (wasPlaying) this.play();
+  };
+
+  global.Player = Player;
+  global.effectiveGain = effectiveGain;
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = { Player: Player, effectiveGain: effectiveGain };
+  }
+})(typeof window !== "undefined" ? window : globalThis);

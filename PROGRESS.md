@@ -1,0 +1,53 @@
+# earforge PROGRESS
+
+Local, GPU-accelerated learn-by-ear workbench on top of muscriptor. PyPI `earforge` 0.1.0. State: SHIPPED (v1 complete, pending the owner's PyPI/GitHub push from the phone).
+
+## Phase 0 verification (2026-10-06, all live-fetched)
+
+- muscriptor README verified: exact claims match (most accurate open-source transcription model, MIT code / CC BY-NC 4.0 weights, models 103M/307M/1.4B, Windows GPU via cu128 backend, sheets output tree, MuseScore 4+ requirement).
+- muscriptor main.py, events.py, transcription_model.py, beats.py, sheets.py, auralization.py, download.py, soundfonts.py, mt3.py, server.py all fetched from raw.githubusercontent.
+- Issues page verified: exactly 19 open, #109/#110 (MP3 handling), #102 (4090 speed), #71 (tempo grid, 7 reactions), #85 (engraving) all present with the named users/dates.
+- pianoify README verified: "Mirelo bills 2.5 credits per second of input", "The box costs nothing per clip because the instance is rented by the hour", "muscriptor fork tailored for piano".
+
+### The one gap Phase 0 caught late
+
+muscriptor on PyPI (0.3.0, latest) lags GitHub main: the wheel has no `muscriptor/utils/sheets.py`, no `transcribe_and_postprocess`, and `events_to_midi_bytes` has no `quantize` parameter. Resolution (shipped): earforge probes for the upstream implementation first and otherwise uses `earforge/_sheets.py` (verbatim attributed port of upstream's MIT sheets module) plus `earforge/midibridge.py` (event-time quantizer, algebraically identical to upstream's note-level snap). Both go unused when a future muscriptor ships them.
+
+## Cost model
+
+No paid anything. Model weights gated-free (HF license acceptance + free token, owner one-time step the brief itself specifies). Soundfont ungated MIT (verified `gated: false` via the HF API). ffmpeg/fluidsynth/MuseScore are free optional system deps. NOT BLOCKED.
+
+## Environment (this PC)
+
+- RTX 4090 24 GB, driver 610.88. Python 3.11.9 default, 3.12 used for the venv.
+- ffmpeg 9.0.2 and fluidsynth 2.6.1 bundled under tools/ (gitignored) for dev/test; absent system-wide.
+- MuseScore: intentionally not installed (would need a system install outside the project folder); the sheets path degrades exactly as the brief's edge case requires and detection is tested with fake binaries.
+- HF_TOKEN: absent machine-wide (env user+machine, ~/.cache/huggingface, ~/.huggingface). The model repo is `gated: "auto"` and account creation is forbidden to the agent, so the real transcription run is owner-assisted. Everything else was verified live.
+
+## Verified working (real, not stubs)
+
+- `pytest -q`: 50 passed, 1 skipped (the gpu-marked test, which needs EARFORGE_GPU=1 + HF_TOKEN + CUDA).
+- Real ffmpeg conversion (stereo 44.1k wav and a 320 kbps mp3 to 32 kHz mono), corrupt-input and missing-ffmpeg error paths.
+- Real fluidsynth stem rendering through the really-downloaded MuseScore_General.sf2 (215 MB, from the ungated MuScriptor/assets HF repo), including the half-speed re-render being twice as long.
+- Server integration (stub model over the real FastAPI app): SSE pairing invariant, progress, tempo-fallback banner, cancel mid-run, instrument masking + abbreviation/ambiguity errors, model switch, exports (MThd MIDI, ndjson), library CRUD, delete-running refused, 503s with install hints, empty upload.
+- Full browser drive over CDP against the built wheel served from a clean venv install (screenshots in docs/):
+  - 35 instrument chips load; real mp3 dropped via the file input; real conversion; the REAL gated-download error rendered as setup instructions (02-auth-path.png).
+  - Library lists jobs; the example job reopens through the real SSE replay path: 4 lanes, 208 notes, duration 24 s (04-workspace.png).
+  - Stems rendered at 1.00 and 0.75, playback advances the playhead (0:01.2 -> 0:02.7), solo engages (05-solo-bass.png), loop arms ("Loop: 0.0s-14.8s"), rate 75% re-renders stems (06-loop-rate.png).
+  - Canvas painted (627k non-background pixels), MIDI export Content-Disposition correct, DELETE removes jobs.
+
+Bugs found by driving and fixed: mixer id mismatch killed the workspace (`gainOriginal` vs `gainoriginal`), EventSource reconnect loop after terminal events, blocking fluidsynth/MuseScore calls inside async endpoints, no subprocess timeouts, native-quantize grid field not carried forward.
+
+## Next steps for the owner (acceptance run, from the phone)
+
+1. Create the GitHub repo (Booyaka101/earforge), push, then `pip install -e .` anywhere or `twine upload dist/earforge-0.1.0-py3-none-any.whl` (the wheel in dist/ is current).
+2. One-time: accept the license at https://huggingface.co/MuScriptor/muscriptor-medium (granted automatically), create a read token, `setx HF_TOKEN hf_...`, reopen the terminal.
+3. On the CUDA venv: `pip install earforge` + `pip install torch --force-reinstall --index-url https://download.pytorch.org/whl/cu128`, run `earforge`, drop a real 3-minute song, confirm >=2 lanes, solo/mute/loop/tempo, then with network unplugged repeat (model and soundfont are cached by then).
+4. `EARFORGE_GPU=1 pytest -m gpu` for the real-model integration test.
+5. Optional: record docs/demo.gif of a real transcription and swap the hero image.
+
+## Known limitations (documented in README)
+
+- The real-model transcription path itself was not exercisable on this machine today (no HF token); it is the single owner-assisted step. Everything around it is real.
+- Sheets engraving needs a real MuseScore 4 install; not present on this PC (verified the hidden-button and 503 paths instead, plus detection with fake binaries).
+- One GPU transcription at a time (upstream's own constraint); tempo slider changes the original's pitch (stems keep pitch); no velocity recovery (model limitation, upstream issue #103).
