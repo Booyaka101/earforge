@@ -46,3 +46,30 @@ def test_artifact_paths_under_job_dir(home):
     assert home.source_wav(jid).parent == home.library_root / jid
     assert home.stems_dir(jid).name == "stems"
     assert home.sheets_zip(jid).name == "sheets.zip"
+
+
+def test_prune_rate_caches_keeps_full_speed_plus_newest(home):
+    """A slider sweep must not grow a job's render cache without bound."""
+    import os
+
+    jid = home.create_job("x.wav", "medium", [])["id"]
+    rates_dir = home.stems_dir(jid)
+    stamps = {"0.50": 1000, "0.60": 2000, "0.70": 3000, "0.80": 4000, "1.00": 5000}
+    for rate, mtime in stamps.items():
+        d = rates_dir / rate
+        d.mkdir(parents=True)
+        (d / "drums.wav").write_bytes(b"x")
+        os.utime(d, (mtime, mtime))
+    audio_rates = home.job_dir(jid) / "audio_rates"
+    audio_rates.mkdir()
+    for rate, mtime in stamps.items():
+        f = audio_rates / f"{rate}.wav"
+        f.write_bytes(b"x")
+        os.utime(f, (mtime, mtime))
+
+    home.prune_rate_caches(jid)
+
+    kept = sorted(d.name for d in rates_dir.iterdir())
+    assert kept == ["0.70", "0.80", "1.00"], "full speed plus the two newest"
+    kept_audio = sorted(f.stem for f in audio_rates.glob("*.wav"))
+    assert kept_audio == ["0.70", "0.80", "1.00"]

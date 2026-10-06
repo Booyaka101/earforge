@@ -25,7 +25,12 @@ First release.
 - Library of past transcriptions in SQLite with one-click reopen, stored under
   %LOCALAPPDATA%/earforge.
 - Expected-instruments chips mask the model vocabulary through muscriptor's
-  resolve_instrument_names, so phantom instruments cannot be decoded at all.
+  resolve_instrument_names, so phantom instruments cannot be decoded at all
+  (verified against the real model: the same file unmasked yields three
+  lanes; masked to bass and drums it yields exactly those two).
+- A second upload while the GPU is busy says it is queued instead of looking
+  hung, and speed-render caches are pruned per job (full speed plus the two
+  most recent speeds) so a slider sweep cannot grow storage without bound.
 - Speed control keeps pitch everywhere: stems re-render from scaled note
   times, the original recording through ffmpeg's atempo. Per-speed audio is
   cached server-side, and each mixer row can download its instrument as a

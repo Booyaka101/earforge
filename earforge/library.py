@@ -86,6 +86,27 @@ class Library:
     def stems_dir(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "stems"
 
+    def prune_rate_caches(self, job_id: str, keep_full: str = "1.00", max_extra: int = 2) -> None:
+        """Speed renders are tens of MB each (a stem set per instrument per
+        speed); keep the full-speed renders plus the most recently used few
+        so a slider sweep cannot grow a job directory without bound."""
+        stems = self.stems_dir(job_id)
+        if stems.is_dir():
+            extras = sorted(
+                (d for d in stems.iterdir() if d.is_dir() and d.name != keep_full),
+                key=lambda d: d.stat().st_mtime,
+            )
+            for d in extras[: max(0, len(extras) - max_extra)]:
+                shutil.rmtree(d, ignore_errors=True)
+        rates_dir = self.job_dir(job_id) / "audio_rates"
+        if rates_dir.is_dir():
+            extras = sorted(
+                (f for f in rates_dir.glob("*.wav") if f.stem != keep_full),
+                key=lambda f: f.stat().st_mtime,
+            )
+            for f in extras[: max(0, len(extras) - max_extra)]:
+                f.unlink(missing_ok=True)
+
     def sheets_dir(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "sheets"
 

@@ -244,6 +244,13 @@ def create_app(
                 run.emit({"type": "job_cancelled"})
                 lib.update_job(job["id"], status="cancelled")
                 return
+            # say so before parking on the GPU lock: a second upload can wait
+            # minutes behind a long one, and silence reads as a hang
+            if gpu_lock.locked():
+                run.emit({
+                    "type": "banner", "kind": "queued",
+                    "message": "Another transcription is running; this one starts when the GPU is free.",
+                })
             try:
                 with gpu_lock:
                     loaded = models.get(job["model"])
@@ -461,6 +468,7 @@ def create_app(
                     )
                 except transcribe.TranscriptionError as e:
                     raise HTTPException(status_code=503, detail=str(e)) from e
+            lib.prune_rate_caches(job_id)
             path = stretched
         return FileResponse(path, media_type="audio/wav")
 
@@ -510,6 +518,7 @@ def create_app(
                         " it is cached after that."
                     ),
                 ) from e
+            lib.prune_rate_caches(job_id)
         return FileResponse(stem_path, media_type="audio/wav")
 
     @app.get("/api/jobs/{job_id}/export/midi")

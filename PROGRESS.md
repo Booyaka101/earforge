@@ -67,6 +67,8 @@ Fourth review loop (loop 4), with the real model live for the first time: a 3:20
 
 Done in the review pass instead of deferred: pitch-preserving slowdown of the original (ffmpeg atempo), per-instrument MIDI download, upload-filename sanitization, model-size LRU cache, slider debounce, resize-aware roll, delete confirmation, and the Space-key/mixer-button focus conflict.
 
+Fifth review loop (loop 5): the player's scheduling math gained headless unit tests (fake AudioContext recording every scheduled source; 10 assertions across play/pause/seek/stretch/loop/solo, run from pytest alongside the mix-gain tests, which now run every tests/js suite). Dead `setRate` removed. A second upload waiting on the GPU now emits a queued banner instead of looking hung (tested). Stem and speed-render caches are pruned per job to full-speed plus the two most recent speeds, capping what a slider sweep can write (tested against mtimes). Instrument-chip masking verified against the real model: the demo file unmasked yields electric_bass/drums/acoustic_guitar; masked to electric_bass+drums it yields exactly those two lanes. The player-test work also corrected the test's own misuse of the internal schedule API (span is derived, not passed), confirming the shipped math. Final state: 67 passed + 1 gpu (passing with a token), plus 17 JS assertions in node.
+
 ## Known limitations (documented in README)
 
 - The real-model transcription path itself was not exercisable on this machine today (no HF token); it is the single owner-assisted step. Everything around it is real.

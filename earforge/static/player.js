@@ -195,18 +195,6 @@
     }
   };
 
-  Player.prototype.setRate = function (rate, buffersAtRate) {
-    /* buffersAtRate: replacement buffers rendered at `rate`, original
-       included. Re-anchors at the current raw position. */
-    var pos = this.position();
-    var wasPlaying = this.playing;
-    this.pause();
-    this.rate = rate;
-    for (var id in buffersAtRate) this.buffers[id] = buffersAtRate[id];
-    this.anchorPos = Math.min(pos, this.duration);
-    if (wasPlaying) this.play();
-  };
-
   global.Player = Player;
   global.effectiveGain = effectiveGain;
   if (typeof module !== "undefined" && module.exports) {

@@ -287,6 +287,21 @@ def test_stem_render_network_failure_clear_message(stub_home, tmp_path, monkeypa
     assert "soundfont" in r.json()["detail"]
 
 
+def test_second_job_reports_queued_behind_gpu_lock(stub_home, tmp_path):
+    """A second upload waiting on the GPU must say so, not look hung."""
+    stub = StubModel(chunk_delay=0.5)
+    client = _client(stub_home, stub)
+    first = _post_audio(client, tmp_path, name="one.wav")
+    time.sleep(0.3)  # let the first reach the model
+    second = _post_audio(client, tmp_path, name="two.wav")
+    events = sse_events(client.get(f"/api/jobs/{second}/events").text)
+    kinds = [(e["type"], e.get("kind")) for e in events]
+    assert ("banner", "queued") in kinds
+    _wait_complete(client, first)
+    _wait_complete(client, second)
+    assert client.get(f"/api/jobs/{second}").json()["status"] == "complete"
+
+
 def test_delete_running_job_refused(stub_home, tmp_path):
     stub = StubModel(chunk_delay=0.4)
     client = _client(stub_home, stub)
