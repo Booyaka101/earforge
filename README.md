@@ -49,7 +49,7 @@ Weights download on first transcription (medium is about 1.2 GB) and are cached.
 
 ### GPU on Windows
 
-PyPI's torch wheels for Windows are CPU-only. For CUDA (an RTX 4090 transcribes roughly 4x faster than realtime on medium), install the CUDA build after earforge:
+PyPI's torch wheels for Windows are CPU-only. For CUDA (substantially faster than CPU for the medium and large models), install the CUDA build after earforge:
 
 ```
 pip install earforge
