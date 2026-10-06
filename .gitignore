@@ -17,3 +17,5 @@ __pycache__/
 *.log
 .e2e/
 .clean-install/
+
+.pypi-check/

@@ -1,6 +1,6 @@
 # earforge PROGRESS
 
-Local, GPU-accelerated learn-by-ear workbench on top of muscriptor. PyPI `earforge` 0.1.0. State: SHIPPED (v1 complete, pending the owner's PyPI/GitHub push from the phone).
+Local, GPU-accelerated learn-by-ear workbench on top of muscriptor. **SHIPPED 2026-10-06: github.com/Booyaka101/earforge (tag v0.1.0, release with wheel attached) and pypi.org/project/earforge/0.1.0.** Verified installed from PyPI into a fresh venv (`pip install earforge` -> `earforge --version` -> 0.1.0).
 
 ## Phase 0 verification (2026-10-06, all live-fetched)
 
