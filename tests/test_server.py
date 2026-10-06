@@ -229,6 +229,64 @@ def test_delete_job(stub_home, tmp_path):
     assert client.get(f"/api/jobs/{job_id}").status_code == 404
 
 
+def test_startup_sweep_orphans_running_jobs(home):
+    """A server restart kills workers silently; their rows must not claim
+    running forever."""
+    job = home.create_job("ghost.wav", "medium", [])
+    home.update_job(job["id"], duration_s=10.0)
+    # no live run exists: this is exactly the state a restart leaves behind
+    create_app(model="medium", library=home, model_factory=lambda s: StubModel())
+    swept = home.get_job(job["id"])
+    assert swept["status"] == "error"
+    assert "restarted" in swept["error"]
+
+
+class _CrashingModel(StubModel):
+    """Yields one event, then dies like a GPU fault would."""
+
+    def transcribe(self, audio, instruments=None, batch_size=1, no_eos_is_ok=True):
+        from muscriptor.events import ProgressEvent
+
+        yield ProgressEvent(completed=0, total=4)
+        raise RuntimeError("CUDA error: device-side assert")
+
+
+def test_model_crash_mid_stream_is_a_clean_error(stub_home, tmp_path):
+    client = _client_factory(stub_home, lambda size: _CrashingModel())
+    job_id = _post_audio(client, tmp_path)
+    _wait_complete(client, job_id)
+
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "error"
+    assert "CUDA error" in job["error"]
+
+    events = sse_events(client.get(f"/api/jobs/{job_id}/events").text)
+    assert events[-1]["type"] == "job_error"
+    assert "CUDA error" in events[-1]["message"]
+    # the stream closed: the last line is terminal, not a hang
+
+
+def test_stem_render_network_failure_clear_message(stub_home, tmp_path, monkeypatch, tools_path):
+    """A failed soundfont fetch must explain itself, not bare-500."""
+    stub = StubModel()
+    client = _client(stub_home, stub)
+    job_id = _post_audio(client, tmp_path)
+    _wait_complete(client, job_id)
+
+    import earforge.synth as synth_mod
+
+    def broken_render(*args, **kwargs):
+        raise OSError("network is unreachable")
+
+    monkeypatch.setattr(synth_mod, "render_stem", broken_render)
+    # defeat any cached copy from a previous run
+    stems = stub_home.stems_dir(job_id) / "1.00" / "electric_bass.wav"
+    stems.unlink(missing_ok=True)
+    r = client.get(f"/api/jobs/{job_id}/stems/electric_bass?rate=1.0")
+    assert r.status_code == 502
+    assert "soundfont" in r.json()["detail"]
+
+
 def test_delete_running_job_refused(stub_home, tmp_path):
     stub = StubModel(chunk_delay=0.4)
     client = _client(stub_home, stub)

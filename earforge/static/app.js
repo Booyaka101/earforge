@@ -159,6 +159,8 @@
     if (state.es) { state.es.close(); state.es = null; }
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     player.pause();
+    player.setLoop(null);
+    roll.setLoop(null);
     state.notes = new Map();
     state.eventsSeen = new Set();
     state.instruments = [];
@@ -169,6 +171,8 @@
     state.audioCache = {};
     state.stemCache = {};
     state.rate = 1;
+    state.progress = null;
+    state.firstProgressAt = 0;
     $("rateSlider").value = 100;
     $("rateLabel").textContent = "100%";
     $("rateNote").textContent = "";

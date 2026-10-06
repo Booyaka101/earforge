@@ -34,8 +34,11 @@ First release.
   page, or a Content-Disposition header.
 - Survives its own failures: a worker that dies mid-run (or a server restart)
   leaves a replayable event log, and the browser finalizes the job from the
-  record instead of reconnecting forever. Stem and speed renders are atomic,
-  so concurrent requests can never interleave writes into one file.
+  record instead of reconnecting forever. A startup sweep re-marks jobs that
+  claimed "running" across a restart, uploads stream to disk instead of RAM,
+  and stem/speed renders are atomic, so concurrent requests can never
+  interleave writes into one file. The soundfont prefetches in the background
+  at startup so the first play is not the first network hop.
 - The roll caches its static scene offscreen; the animation frame only blits
   it and draws the playhead, active notes, and loop region, so long songs
   stay smooth. Arrow keys seek (2 s, Shift for 10), Space toggles playback.

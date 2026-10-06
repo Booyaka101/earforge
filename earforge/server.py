@@ -10,11 +10,12 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from muscriptor.soundfonts import SF2_URL
 from muscriptor.tokenizer.mt3 import (
     MT3_FULL_PLUS_GROUP_NAMES,
     resolve_instrument_names,
 )
-from muscriptor.utils.download import ModelDownloadError
+from muscriptor.utils.download import ModelDownloadError, download_if_necessary
 
 from earforge import __version__, exports, synth, transcribe
 from earforge.library import Library
@@ -79,8 +80,13 @@ class JobRun:
 
     def finish(self) -> None:
         with self.cond:
+            if self.finished:
+                return
             self.finished = True
-            self._jsonl.close()
+            try:
+                self._jsonl.close()
+            except Exception:  # noqa: BLE001 - already closed or unwritable
+                pass
             self.cond.notify_all()
 
     def stream(self):
@@ -150,6 +156,29 @@ def create_app(
     # one GPU transcription at a time, like muscriptor's own server
     gpu_lock = threading.Lock()
 
+    # a server restart kills workers without a goodbye; their DB rows would
+    # claim "running" forever. Nothing is running yet, so anything still
+    # marked running is an orphan of a previous process.
+    for row in lib.list_jobs():
+        if row["status"] == "running":
+            lib.update_job(
+                row["id"],
+                status="error",
+                error="interrupted: the earforge server restarted mid-run",
+            )
+
+    # the soundfont is a one-time 215 MB download; pull it in the background
+    # so the first stem render is not the first time the network is needed
+    if synth.available():
+
+        def prefetch_soundfont():
+            try:
+                download_if_necessary(SF2_URL)
+            except Exception:
+                pass  # the render path surfaces the real error with context
+
+        threading.Thread(target=prefetch_soundfont, daemon=True).start()
+
     def get_job_or_404(job_id: str) -> dict:
         job = lib.get_job(job_id)
         if job is None:
@@ -167,6 +196,21 @@ def create_app(
             media_type=media_type,
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
+
+    def fail(run: JobRun, job_id: str, message: str) -> None:
+        """End a job as an error without letting a broken emit eat the cleanup.
+
+        If the disk is full, emitting the error can throw just like the event
+        that got us here; the stream must still be closed and the row updated.
+        """
+        try:
+            run.emit({"type": "job_error", "message": message})
+        except Exception:  # noqa: BLE001 - nothing left to report through
+            pass
+        try:
+            lib.update_job(job_id, status="error", error=message)
+        except Exception:  # noqa: BLE001
+            pass
 
     def worker(run: JobRun, upload_path: Path, instruments: list[str] | None) -> None:
         job = run.job
@@ -198,8 +242,7 @@ def create_app(
                         instruments=instruments,
                     )
             except ModelDownloadError as e:
-                run.emit({"type": "job_error", "message": str(e)})
-                lib.update_job(job["id"], status="error", error=str(e))
+                fail(run, job["id"], str(e))
                 return
             if result.get("cancelled"):
                 run.emit({"type": "job_cancelled"})
@@ -231,17 +274,15 @@ def create_app(
                 note_count=result["note_count"],
             )
         except transcribe.TranscriptionError as e:
-            run.emit({"type": "job_error", "message": str(e)})
-            lib.update_job(job["id"], status="error", error=str(e))
+            fail(run, job["id"], str(e))
         except Exception as e:  # noqa: BLE001 - the job boundary is the right place
-            run.emit(
-                {"type": "job_error", "message": f"transcription failed: {e}"}
-            )
-            lib.update_job(job["id"], status="error", error=str(e))
+            fail(run, job["id"], f"transcription failed: {e}")
         finally:
-            run.finish()
-            with runs_lock:
-                runs.pop(job["id"], None)
+            try:
+                run.finish()
+            finally:
+                with runs_lock:
+                    runs.pop(job["id"], None)
 
     @app.get("/api/config")
     async def config():
@@ -296,14 +337,20 @@ def create_app(
                 status_code=400, detail=f"{e}. Ask /api/instruments for the names."
             ) from e
 
-        data = await file.read()
-        if not data:
-            raise HTTPException(status_code=400, detail="uploaded file is empty")
-
         job = lib.create_job(_safe_name(file.filename), size, resolved)
         suffix = Path(_safe_name(file.filename)).suffix or ".bin"
+        # stream to disk in chunks: a large upload must not be held in RAM
+        data_size = 0
+        upload_tmp = lib.job_dir(job["id"]) / f"upload{suffix}.part"
+        with open(upload_tmp, "wb") as sink:
+            while chunk := await file.read(8 * 1024 * 1024):
+                data_size += len(chunk)
+                sink.write(chunk)
+        if data_size == 0:
+            upload_tmp.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="uploaded file is empty")
         upload_path = lib.job_dir(job["id"]) / f"upload{suffix}"
-        upload_path.write_bytes(data)
+        upload_tmp.replace(upload_path)
 
         run = JobRun(job, lib)
         with runs_lock:
@@ -433,6 +480,16 @@ def create_app(
                 raise HTTPException(status_code=500, detail=str(e)) from e
             except transcribe.TranscriptionError as e:
                 raise HTTPException(status_code=500, detail=str(e)) from e
+            except Exception as e:  # noqa: BLE001 - e.g. a failed soundfont fetch
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"could not render the '{instrument}' stem: {e}."
+                        " If the machine is offline, reconnect once so the"
+                        " MuseScore_General soundfont can finish downloading;"
+                        " it is cached after that."
+                    ),
+                ) from e
         return FileResponse(stem_path, media_type="audio/wav")
 
     @app.get("/api/jobs/{job_id}/export/midi")

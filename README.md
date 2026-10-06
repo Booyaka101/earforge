@@ -13,7 +13,7 @@ The point is the practice loop, not just the transcription: see the bass lane, s
 - Notes stream into a canvas piano roll live, one colored lane per instrument, with bar lines when a tempo is detected.
 - Playback mixes the original audio with per-instrument stems synthesized through fluidsynth (MuseScore_General soundfont). Solo, mute, and a gain slider per instrument, plus a gain slider for the original. Space toggles playback, arrow keys seek (Shift for bigger steps).
 - A/B loop by dragging on the ruler. Speed from 50% to 100%, pitch preserved on every source: stems are re-rendered from scaled note times, the original through ffmpeg's atempo time-stretch.
-- Exports: the performance MIDI, the raw event stream as JSONL, and the engraved sheets tree (score.mid, score.musicxml, full_score.pdf, one PDF per instrument, tab PDFs for fretted instruments) as a zip.
+- Exports: the performance MIDI, the raw event stream as JSONL, one MIDI per instrument, and the engraved sheets tree (score.mid, score.musicxml, full_score.pdf, one PDF per instrument, tab PDFs for fretted instruments) as a zip.
 - Every transcription is kept in a local library (SQLite) with one-click reopen.
 - "Expected instruments" chips mask the model's vocabulary, so phantom instruments cannot be decoded at all.
 
