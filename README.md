@@ -2,7 +2,7 @@
 
 A local, GPU-accelerated learn-by-ear workbench. Drop any recording in; earforge turns it into multi-instrument MIDI, a live piano roll, and a play-along practice mixer where every instrument can be soloed, muted, slowed, and looped while you learn the part. It runs [MuScriptor](https://github.com/muscriptor/muscriptor), the open-source music transcription model from Kyutai and Mirelo, on your own machine.
 
-![earforge: a real transcription playing back with soloed bass](docs/demo.gif)
+![earforge: a real transcription playing back with soloed bass](https://raw.githubusercontent.com/Booyaka101/earforge/main/docs/demo.gif)
 
 The point is the practice loop, not just the transcription: see the bass lane, solo it, drop the speed to 70%, loop the chorus, and play along. Everything is offline after the one-time model download. Nothing is uploaded anywhere; there is no account and no bill.
 
