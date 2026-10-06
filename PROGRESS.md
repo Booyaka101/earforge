@@ -46,6 +46,16 @@ Bugs found by driving and fixed: mixer id mismatch killed the workspace (`gainOr
 4. `EARFORGE_GPU=1 pytest -m gpu` for the real-model integration test.
 5. Optional: record docs/demo.gif of a real transcription and swap the hero image.
 
+## Feature candidates for the next release (not in v1, deliberate)
+
+- Pitch-preserved slowdown of the ORIGINAL recording (ffmpeg `atempo` re-render or a small time-stretch), removing the one honest wart of the speed control.
+- "Minus one" export: render the mix minus soloed/muted instruments to WAV for playing along outside the browser.
+- Per-instrument MIDI download (stems exist server-side already; it is one more FileResponse).
+- Metronome click during looped playback (the grid is known when tempo detection succeeded).
+- Roll zoom (currently fixed fit-to-width with follow) and keyboard shortcuts beyond Space.
+- Upstream's auralization (stereo original-vs-synth check mix) as an export.
+- Swap the vendored `_sheets.py`/`midibridge` ports for upstream imports the day muscriptor ships them on PyPI (the code already prefers upstream when present; then delete the ports and the try/except).
+
 ## Known limitations (documented in README)
 
 - The real-model transcription path itself was not exercisable on this machine today (no HF token); it is the single owner-assisted step. Everything around it is real.
