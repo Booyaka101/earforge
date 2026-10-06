@@ -497,6 +497,19 @@ def test_upload_filename_sanitized(stub_home, tmp_path):
     assert midi.status_code in (200, 404)
 
 
+def test_upload_windows_reserved_name_guarded(stub_home, tmp_path):
+    """CON.mp3 must not become a device-name path."""
+    client = _client(stub_home, StubModel())
+    wav = make_wav(tmp_path / "x.wav", seconds=0.5)
+    r = client.post(
+        "/api/jobs",
+        files={"file": ("CON.mp3", wav.read_bytes(), "audio/wav")},
+    )
+    assert r.status_code == 200
+    job = client.get(f"/api/jobs/{r.json()['id']}").json()
+    assert job["source_name"] == "_CON.mp3"
+
+
 def test_ffmpeg_missing_gives_503(stub_home, tmp_path, monkeypatch):
     from earforge import server as server_mod
 

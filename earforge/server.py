@@ -128,15 +128,28 @@ def _replay_file(path: Path):
                 yield _sse_line(json.loads(line))
 
 
+# CreateFile still maps these bare stems to devices on Windows, even with
+# an extension and a directory prefix in some APIs
+_WINDOWS_RESERVED = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
 def _safe_name(filename: str | None) -> str:
     """A filename safe to store, print, and put in a Content-Disposition.
 
     Uploads carry whatever the client sent; quotes and newlines would break
-    the header, path bits and angle brackets have no business in a stored name.
+    the header, path bits and angle brackets have no business in a stored name,
+    and Windows device names must never become a stem.
     """
     name = Path(filename or "audio").name
     for ch in '"\'\r\n<>&':
         name = name.replace(ch, "_")
+    stem = name.split(".")[0]
+    if stem.upper() in _WINDOWS_RESERVED:
+        name = "_" + name
     return name[:120] or "audio"
 
 
@@ -284,21 +297,28 @@ def create_app(
                 with runs_lock:
                     runs.pop(job["id"], None)
 
+    cuda_checked = False
+    cuda_result = None
+
     @app.get("/api/config")
     async def config():
-        cuda = None
-        try:
-            import torch
+        """The first call a page makes; the torch import costs seconds on a
+        cold start, so the answer is computed once per process."""
+        nonlocal cuda_checked, cuda_result
+        if not cuda_checked:
+            try:
+                import torch
 
-            cuda = torch.cuda.is_available()
-        except Exception:
-            cuda = False
+                cuda_result = torch.cuda.is_available()
+            except Exception:
+                cuda_result = False
+            cuda_checked = True
         return {
             "version": __version__,
             "ffmpeg": transcribe.ffmpeg_path(),
             "fluidsynth": synth.fluidsynth_path(),
             "musescore": exports.sheets_available(),
-            "cuda": cuda,
+            "cuda": cuda_result,
             "model_default": models.default_model,
             "models": list(MODELS),
             "data_dir": str(lib.root),

@@ -85,7 +85,7 @@ REAL TRANSCRIPTION: {"lanes":["electric_bass","drums","acoustic_guitar"],
                      "notes":161, "bpm":100.04}
 ```
 
-That track is a 100 BPM score, and the detected tempo is 100.04. Wall time for the whole transcription was about 11 seconds, roughly twice realtime; the bass and drum lanes are exactly what the track contains. Soloing electric_bass plays only the synthesized bass in sync, and every export answers:
+That track is a 100 BPM score, and the detected tempo is 100.04. Wall time for the whole transcription was about 11 seconds, roughly twice realtime; the bass and drum lanes are exactly what the track contains. At the brief's target scale the same holds: a 3:20, 320 kbps MP3 (199 s) transcribed in **65 s wall time on the same 4090** (3x realtime), 1573 notes, tempo detected at exactly 100 BPM, and the roll and mixer handled it without a hitch (`docs/12-real-3min.png`). Soloing electric_bass plays only the synthesized bass in sync, playback starts while stems are still rendering (the original joins instantly, instruments drop in as they finish), and every export answers:
 
 ```
 GET /api/jobs/<id>/export/midi                 -> 200 (MThd)
@@ -94,7 +94,7 @@ GET /api/jobs/<id>/export/stem/electric_bass.mid -> 200
 GET /api/jobs/<id>/audio?rate=0.75             -> 200 (atempo, pitch kept)
 ```
 
-The GIF above is that run. Screenshots: `docs/10-real-transcription.png` (the workspace as the lanes settled), `docs/11-real-solo.png` (bass soloed). A longer, denser rock track behaves the same at scale: lanes for what the mix actually holds (typically distorted_electric_guitar, electric_bass, drums, often more), a minute or two of transcription for a three-minute song, and the exports below.
+The GIF above is that run. Screenshots: `docs/10-real-transcription.png` (the workspace as the lanes settled), `docs/11-real-solo.png` (bass soloed), `docs/12-real-3min.png` (the 3:20 job mid-playback), `docs/13-real-rubato.png` (a rubato take with the fallback banner up). On input with no steady tempo the transcription still completes and a banner says so:
 
 Without `HF_TOKEN` the first transcription stops at the model download with the exact setup steps instead of a stack trace:
 

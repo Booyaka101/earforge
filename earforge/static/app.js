@@ -20,6 +20,7 @@
     stemCache: {},           /* rate -> {instrument: AudioBuffer} */
     rate: 1,
     view: "upload",
+    jobBanners: [],         /* banners from the event stream, re-rendered in the workspace */
   };
 
   var player = new global.Player();  var roll = null;
@@ -35,6 +36,18 @@
     div.textContent = text;
     $("banners").appendChild(div);
     return div;
+  }
+
+  /* banners that arrive over the job's event stream (tempo fallback, and any
+     future ones) must survive entering the workspace, which clears the
+     pre-job banners; they are remembered and re-rendered */
+  function jobBanner(text, kind) {
+    state.jobBanners.push({ text: text, kind: kind });
+    banner(text, kind);
+  }
+
+  function renderJobBanners() {
+    state.jobBanners.forEach(function (b) { banner(b.text, b.kind); });
   }
 
   function clearBanners() { $("banners").innerHTML = ""; }
@@ -173,6 +186,7 @@
     state.rate = 1;
     state.progress = null;
     state.firstProgressAt = 0;
+    state.jobBanners = [];
     $("rateSlider").value = 100;
     $("rateLabel").textContent = "100%";
     $("rateNote").textContent = "";
@@ -265,7 +279,9 @@
       case "banner":
         if (!state.eventsSeen.has("banner:" + ev.kind)) {
           state.eventsSeen.add("banner:" + ev.kind);
-          banner(ev.message, ev.kind === "tempo_fallback" ? "warn" : "info");
+          jobBanner(
+            ev.message, ev.kind === "tempo_fallback" ? "warn" : "info"
+          );
         }
         break;
       case "job_complete":
@@ -295,6 +311,7 @@
 
   function enterWorkspace() {
     clearBanners();
+    renderJobBanners();
     switchView("workspace");
     show($("cancelBtn"), false);
     show($("progressWrap"), false);
@@ -444,7 +461,8 @@
   /* every playback source is fetched at the current speed: the original
      through the server's pitch-preserving atempo render, stems from scaled
      note times. Both are cached per rate so scrubbing the slider back is
-     instant. */
+     instant. The original is applied the moment it decodes, so Play works
+     while stems are still rendering; the stems join when they land. */
   function loadPlaybackAt(rate) {
     var jobs = [];
 
@@ -455,7 +473,14 @@
           return r.arrayBuffer();
         })
         .then(decodeBuffer)
-        .then(function (audio) { state.audioCache[rate] = audio; }));
+        .then(function (audio) {
+          state.audioCache[rate] = audio;
+          state.originalBuffer = audio;
+          /* stems for this rate are not ready yet; playing none beats
+             playing the previous rate's stems against the new original */
+          if (!state.stemCache[rate]) state.stems = {};
+          applyBuffers();
+        }));
     }
 
     if (state.config && state.config.fluidsynth) {
@@ -477,24 +502,31 @@
       }
     }
 
-    return Promise.all(jobs).then(function (results) {
-      if (!state.stemCache[rate]) {
-        var stems = {};
-        results.forEach(function (r) {
-          if (Array.isArray(r)) stems[r[0]] = r[1];
+    return Promise.all(jobs)
+      .then(function (results) {
+        if (!state.stemCache[rate]) {
+          var stems = {};
+          results.forEach(function (r) {
+            if (Array.isArray(r)) stems[r[0]] = r[1];
+          });
+          state.stemCache[rate] = stems;
+        }
+        state.originalBuffer = state.audioCache[rate];
+        state.stems = state.stemCache[rate];
+        applyBuffers();
+      })
+      .catch(function (e) {
+        if (e && e.message && /original audio/.test(e.message)) {
+          banner("Playback audio failed to load: " + e.message, "warn");
+        } else {
+          banner("Stem rendering failed: " + (e.message || e), "warn");
+        }
+      })
+      .then(function () {
+        state.instruments.forEach(function (inst) {
+          $("spin" + CSS.escape(inst)).textContent = "";
         });
-        state.stemCache[rate] = stems;
-      }
-      state.originalBuffer = state.audioCache[rate];
-      state.stems = state.stemCache[rate];
-      applyBuffers();
-    }).catch(function (e) {
-      banner("Playback audio failed to load: " + (e.message || e), "warn");
-    }).then(function () {
-      state.instruments.forEach(function (inst) {
-        $("spin" + CSS.escape(inst)).textContent = "";
       });
-    });
   }
 
   function applyBuffers() {
