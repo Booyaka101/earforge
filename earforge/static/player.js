@@ -59,6 +59,15 @@
       }
       this.gains[id].gain.value = effectiveGain(channels, id);
     }
+    /* drop channels that no longer exist, so a previous job's lanes stop
+       occupying the graph */
+    for (var old in this.gains) {
+      if (!(old in channels)) {
+        try { this.gains[old].disconnect(); } catch (e) { /* fine */ }
+        delete this.gains[old];
+        delete this.channels[old];
+      }
+    }
   };
 
   Player.prototype.updateGains = function () {

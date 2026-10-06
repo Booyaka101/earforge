@@ -5,7 +5,6 @@
   var state = {
     config: null,
     jobId: null,
-    jobMeta: null,
     notes: new Map(),        /* note index -> note object */
     eventsSeen: new Set(),
     instruments: [],
@@ -158,14 +157,13 @@
 
   function resetWorkspace() {
     if (state.es) { state.es.close(); state.es = null; }
-    if (rafId) cancelAnimationFrame(rafId);
+    if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     player.pause();
     state.notes = new Map();
     state.eventsSeen = new Set();
     state.instruments = [];
     state.duration = 0;
     state.grid = null;
-    state.jobMeta = null;
     state.stems = {};
     state.originalBuffer = null;
     state.audioCache = {};
@@ -191,10 +189,35 @@
       first = false;
     };
     es.onerror = function () {
-      /* a live drop reconnects and replays (the UI dedupes by note index);
-         a terminal event already closed the stream, so this only fires for
-         real mid-job drops */
-      if (state.jobId !== jobId) es.close();
+      if (state.jobId !== jobId) { es.close(); return; }
+      /* The stream ended. If a live run holds this job, this was a drop:
+         let EventSource reconnect (replay + live; the UI dedupes). Anything
+         else, a finished job or a worker that died mid-run, would loop
+         forever on reconnects: finalize from the job record instead. */
+      global.fetch("/api/jobs/" + jobId)
+        .then(function (r) { return r.json(); })
+        .then(function (job) {
+          if (state.jobId !== jobId) { es.close(); return; }
+          if (job.active) return;
+          es.close();
+          if (state.es === es) state.es = null;
+          if (job.status === "error" && state.view === "upload") {
+            jobFailed(job.error || "transcription failed");
+          } else if (state.notes.size > 0) {
+            state.duration = job.duration_s || state.duration;
+            if (job.instruments_found && job.instruments_found.length) {
+              state.instruments = job.instruments_found;
+            } else if (!state.instruments.length) {
+              state.notes.forEach(function (n) {
+                if (state.instruments.indexOf(n.instrument) < 0) {
+                  state.instruments.push(n.instrument);
+                }
+              });
+            }
+            enterWorkspace();
+          }
+        })
+        .catch(function () { /* server unreachable: EventSource retries */ });
     };
   }
 
@@ -207,7 +230,6 @@
       case "job_start":
         if (first || state.view === "upload") {
           state.duration = ev.duration_s || 0;
-          state.jobMeta = { source_name: ev.source_name, model: ev.model };
           $("progressText").textContent = "loading model...";
         }
         break;
@@ -561,7 +583,7 @@
         row.innerHTML =
           "<span class='status-dot " + dotCls + "'></span>" +
           "<span class='name'>" + escapeHtml(job.source_name) + "</span>" +
-          "<span class='hint'>" + dur + " · " + escapeHtml(insts) + "</span>" +
+          "<span class='hint'>" + dur + " · " + job.model + " · " + escapeHtml(insts) + "</span>" +
           "<span class='hint'>" + escapeHtml(job.created_at.replace("T", " ")) + "</span>";
         row.onclick = function (e) {
           if (e.target.tagName === "BUTTON") return;
@@ -587,7 +609,6 @@
     global.fetch("/api/jobs/" + id).then(function (r) { return r.json(); }).then(function (job) {
       state.jobId = id;
       state.duration = job.duration_s || 0;
-      state.jobMeta = job;
       state.instruments = job.instruments_found || [];
       if (job.bpm != null) {
         state.grid = { bpm: job.bpm, beatsPerBar: job.beats_per_bar, firstDownbeat: 0 };
@@ -622,6 +643,15 @@
     var tag = e.target.tagName;
     if (tag === "INPUT" || tag === "SELECT" || tag === "BUTTON") return;
     if (e.code === "Space") { e.preventDefault(); togglePlay(); }
+    if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
+      e.preventDefault();
+      var step = e.shiftKey ? 10 : 2;
+      var target = Math.max(0, Math.min(
+        state.duration, player.position() + (e.code === "ArrowRight" ? step : -step)));
+      player.seek(target);
+      roll.setPosition(target);
+      roll.follow = true;
+    }
   });
 
   global.earforgeState = state;

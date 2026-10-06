@@ -32,6 +32,13 @@ First release.
   standalone MIDI file.
 - Uploaded filenames are sanitized before they reach storage, the library
   page, or a Content-Disposition header.
+- Survives its own failures: a worker that dies mid-run (or a server restart)
+  leaves a replayable event log, and the browser finalizes the job from the
+  record instead of reconnecting forever. Stem and speed renders are atomic,
+  so concurrent requests can never interleave writes into one file.
+- The roll caches its static scene offscreen; the animation frame only blits
+  it and draws the playhead, active notes, and loop region, so long songs
+  stay smooth. Arrow keys seek (2 s, Shift for 10), Space toggles playback.
 - Labelled examples (repo only, not in the wheel): a synthesized demo track
   and a seedable example job so the workspace can be tried before the model
   weights finish downloading.

@@ -7,9 +7,12 @@ with ``model.events_to_midi_bytes`` so exported bytes are identical to what
 """
 
 import dataclasses
+import os
 import shutil
 import subprocess
+import tempfile
 import wave
+from collections.abc import Callable
 from pathlib import Path
 
 from muscriptor.events import NoteEndEvent, NoteStartEvent, ProgressEvent
@@ -138,6 +141,40 @@ def render_audio_at_rate(src: Path, rate: float, dst: Path) -> Path:
         raise TranscriptionError(
             f"ffmpeg could not slow '{Path(src).name}' to {rate:.0%}: {hint}"
         )
+    return dst
+
+
+def atomic_render(render: Callable[[Path], None], dst: Path) -> Path:
+    """Run a blocking render into `dst` so concurrent requests can't corrupt it.
+
+    Two tabs asking for the same stem (or the same slowed original) would
+    otherwise run two synth processes writing one file. Rendering into a
+    per-process temp name and renaming is atomic on the same volume, so a
+    loser's output is simply replaced by a winner's.
+    """
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        return dst
+    fd, tmp_name = tempfile.mkstemp(
+        dir=str(dst.parent), prefix=dst.stem + "-", suffix=dst.suffix
+    )
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        render(tmp)
+        if not tmp.exists() or tmp.stat().st_size == 0:
+            raise TranscriptionError(f"render produced no audio for '{dst.name}'")
+        try:
+            os.replace(tmp, dst)
+        except PermissionError:
+            # Windows: a concurrent request is streaming the destination we
+            # are replacing. If their file is installed, ours is redundant;
+            # only a missing destination is a real failure.
+            if not dst.exists():
+                raise
+    finally:
+        tmp.unlink(missing_ok=True)
     return dst
 
 

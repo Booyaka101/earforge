@@ -345,6 +345,8 @@ def create_app(
     @app.get("/api/jobs/{job_id}")
     async def get_job(job_id: str):
         job = get_job_or_404(job_id)
+        with runs_lock:
+            job["active"] = job_id in runs
         job["artifacts"] = {
             "audio": lib.source_wav(job_id).exists(),
             "midi": lib.midi_path(job_id).exists(),
@@ -386,7 +388,9 @@ def create_app(
             if not stretched.exists():
                 try:
                     await asyncio.to_thread(
-                        transcribe.render_audio_at_rate, path, rate, stretched
+                        transcribe.atomic_render,
+                        lambda out: transcribe.render_audio_at_rate(path, rate, out),
+                        stretched,
                     )
                 except transcribe.TranscriptionError as e:
                     raise HTTPException(status_code=503, detail=str(e)) from e
@@ -417,13 +421,17 @@ def create_app(
             )
         stem_path = lib.stems_dir(job_id) / f"{rate:.2f}" / f"{instrument}.wav"
         if not stem_path.exists():
+
+            def render(out_path: Path) -> None:
+                synth.render_stem(notes, instrument, rate, out_path)
+
             try:
-                await asyncio.to_thread(
-                    synth.render_stem, notes, instrument, rate, stem_path
-                )
+                await asyncio.to_thread(transcribe.atomic_render, render, stem_path)
             except synth.SynthUnavailable as e:
                 raise HTTPException(status_code=503, detail=str(e)) from e
             except synth.StemError as e:
+                raise HTTPException(status_code=500, detail=str(e)) from e
+            except transcribe.TranscriptionError as e:
                 raise HTTPException(status_code=500, detail=str(e)) from e
         return FileResponse(stem_path, media_type="audio/wav")
 

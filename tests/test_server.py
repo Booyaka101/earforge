@@ -238,6 +238,67 @@ def test_delete_running_job_refused(stub_home, tmp_path):
     _wait_complete(client, job_id)
 
 
+def test_crashed_job_replay_ends_without_terminal_event(stub_home, tmp_path):
+    """A worker that died mid-run leaves no terminal event. The replay must
+    end cleanly (the browser then finalizes from the job record instead of
+    reconnecting forever)."""
+    stub = StubModel()
+    client = _client(stub_home, stub)
+    job_id = _post_audio(client, tmp_path)
+    _wait_complete(client, job_id)
+
+    path = stub_home.events_path(job_id)
+    lines = [l for l in path.read_text().splitlines() if l.strip()]
+    kept = [l for l in lines if '"job_complete"' not in l]
+    path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    stub_home.update_job(job_id, status="running")
+
+    events = sse_events(client.get(f"/api/jobs/{job_id}/events").text)
+    kinds = [e["type"] for e in events]
+    assert "start" in kinds
+    assert "job_complete" not in kinds
+    assert "job_error" not in kinds
+
+    # the job record tells the truth the DB cannot: nothing is live, even
+    # though the status column still says running
+    job = client.get(f"/api/jobs/{job_id}").json()
+    assert job["status"] == "running"
+    assert job["active"] is False
+
+
+def test_concurrent_same_stem_requests(stub_home, tmp_path, tools_path):
+    """Two tabs, one stem: both get 200 and the cached wav is valid."""
+    import io
+    import threading
+    import wave as wavemod
+
+    if not tools_path["fluidsynth"]:
+        pytest.skip("fluidsynth not available")
+    stub = StubModel()
+    app = create_app(model="medium", library=stub_home, model_factory=lambda s: stub)
+    job_id = _post_audio(TestClient(app), tmp_path)
+    _wait_complete(TestClient(app), job_id)
+
+    results = []
+
+    def fetch():
+        with TestClient(app) as c:
+            r = c.get(f"/api/jobs/{job_id}/stems/electric_bass?rate=1.0")
+            results.append((r.status_code, len(r.content)))
+
+    threads = [threading.Thread(target=fetch) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert all(status == 200 and size > 1000 for status, size in results)
+    cached = stub_home.stems_dir(job_id) / "1.00" / "electric_bass.wav"
+    with wavemod.open(str(cached), "rb") as w:
+        assert w.getnframes() > 0
+    assert [p.name for p in cached.parent.iterdir()] == ["electric_bass.wav"]
+
+
 def test_missing_endpoints_404_cleanly(stub_home):
     client = _client(stub_home, StubModel())
     assert client.get("/api/jobs/zzz").status_code == 404

@@ -31,6 +31,12 @@
     this.pxPerSec = 60;
     this.follow = true;
     this.position = -1;       /* raw seconds; -1 hides the playhead */
+    /* static scene (lanes, ruler, notes) is cached here and only re-rendered
+       when the data or layout changes; the animation frame then just blits it
+       and adds the moving parts. A 3000-note song does not re-draw 3000
+       rectangles sixty times a second. */
+    this._layer = document.createElement("canvas");
+    this._layerDirty = true;
 
     var self = this;
     this.canvas.addEventListener("mousedown", function (e) {
@@ -105,31 +111,24 @@
     this.canvas.height = Math.round(h * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.laneH = laneH;
+    this._layer.width = this.canvas.width;
+    this._layer.height = this.canvas.height;
+    this._layerDirty = true;
   };
 
   Roll.prototype.activeNote = function (note, position) {
     return position >= note.start_time && position <= note.end_time;
   };
 
-  Roll.prototype.draw = function () {
-    var ctx = this.ctx, w = this.canvas.width / (global.devicePixelRatio || 1);
-    var h = this.canvas.height / (global.devicePixelRatio || 1);
+  Roll.prototype._renderLayer = function () {
+    var dpr = global.devicePixelRatio || 1;
+    var ctx = this._layer.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    var w = this._layer.width / dpr;
+    var h = this._layer.height / dpr;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "#0c1014";
     ctx.fillRect(0, 0, w, h);
-
-    /* loop region */
-    if (this.loop) {
-      ctx.fillStyle = "rgba(255,180,84,0.10)";
-      ctx.fillRect(this.loop.a * this.pxPerSec, 0,
-        (this.loop.b - this.loop.a) * this.pxPerSec, h);
-      ctx.strokeStyle = "rgba(255,180,84,0.55)";
-      ctx.lineWidth = 1;
-      [this.loop.a, this.loop.b].forEach(function (t) {
-        var x = t * this.pxPerSec;
-        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
-      }, this);
-    }
 
     /* ruler: seconds + bars when a grid is known */
     ctx.fillStyle = "#141b22";
@@ -157,7 +156,6 @@
     }
 
     /* lanes */
-    var pos = this.position;
     this.instruments.forEach(function (name, i) {
       var y0 = RULER_H + i * this.laneH;
       if (i % 2 === 1) {
@@ -181,13 +179,52 @@
       var x = n.start_time * this.pxPerSec;
       var wN = Math.max(2.5, (n.end_time - n.start_time) * this.pxPerSec);
       ctx.fillStyle = colorFor(li);
-      ctx.globalAlpha = pos >= 0 && this.activeNote(n, pos) ? 1 : 0.66;
+      ctx.globalAlpha = 0.66;
       ctx.fillRect(x, y, wN, nh);
       ctx.globalAlpha = 1;
     }, this);
+    this._layerDirty = false;
+  };
 
-    /* playhead */
+  Roll.prototype.draw = function () {
+    if (this._layerDirty) this._renderLayer();
+    var ctx = this.ctx;
+    var dpr = global.devicePixelRatio || 1;
+    var w = this.canvas.width / dpr;
+    var h = this.canvas.height / dpr;
+    ctx.clearRect(0, 0, w, h);
+    ctx.drawImage(this._layer, 0, 0, w, h);
+
+    /* loop region (live: the drag preview draws here too) */
+    var loop = this._pendingLoop || this.loop;
+    if (loop) {
+      ctx.fillStyle = "rgba(255,180,84,0.10)";
+      ctx.fillRect(loop.a * this.pxPerSec, 0,
+        (loop.b - loop.a) * this.pxPerSec, h);
+      ctx.strokeStyle = "rgba(255,180,84,0.55)";
+      ctx.lineWidth = 1;
+      [loop.a, loop.b].forEach(function (t) {
+        var x = t * this.pxPerSec;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+      }, this);
+    }
+
+    /* active notes at full brightness over their dim layer copies, then the
+       playhead */
+    var pos = this.position;
     if (pos >= 0) {
+      this.notes.forEach(function (n) {
+        if (!this.activeNote(n, pos)) return;
+        var li = this.instruments.indexOf(n.instrument);
+        if (li < 0) return;
+        var y0 = RULER_H + li * this.laneH;
+        var rel = (n.pitch - PITCH_MIN) / (PITCH_MAX - PITCH_MIN);
+        var nh = Math.max(3, this.laneH / 26);
+        var y = y0 + this.laneH - 4 - rel * (this.laneH - 8) - nh / 2;
+        ctx.fillStyle = colorFor(li);
+        ctx.fillRect(n.start_time * this.pxPerSec, y,
+          Math.max(2.5, (n.end_time - n.start_time) * this.pxPerSec), nh);
+      }, this);
       ctx.strokeStyle = "#ffffff";
       ctx.lineWidth = 1.4;
       var px = pos * this.pxPerSec;

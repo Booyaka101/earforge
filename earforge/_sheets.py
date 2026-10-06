@@ -197,6 +197,9 @@ def _run(binary: str, args: list[str]) -> subprocess.CompletedProcess:
         # as an input file and the conversion silently loses its real argument.
         env.setdefault("QT_QPA_PLATFORM", "offscreen")
         env.setdefault("MU_QT_QPA_PLATFORM", "offscreen")
+    # local deviation from the upstream port: earforge runs from a windowed
+    # console, and MuseScore would flash a new one on every invocation
+    creationflags = 0x08000000 if os.name == "nt" and hasattr(subprocess, "CREATE_NO_WINDOW") else 0
     try:
         return subprocess.run(
             [binary, *args],
@@ -205,6 +208,7 @@ def _run(binary: str, args: list[str]) -> subprocess.CompletedProcess:
             errors="replace",
             env=env,
             timeout=RUN_TIMEOUT_S,
+            creationflags=creationflags,
         )
     except subprocess.TimeoutExpired:
         return subprocess.CompletedProcess(
