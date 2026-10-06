@@ -71,6 +71,13 @@
       if (self.onLoop) self.onLoop(null);
       self.draw();
     });
+    /* the canvas sizes to its container; a resized window has to relayout */
+    global.addEventListener("resize", function () {
+      if (self.instruments.length) {
+        self.layout();
+        self.draw();
+      }
+    });
   }
 
   Roll.prototype.setData = function (instruments, notes, duration, grid) {

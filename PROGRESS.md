@@ -33,10 +33,11 @@ No paid anything. Model weights gated-free (HF license acceptance + free token, 
 - Full browser drive over CDP against the built wheel served from a clean venv install (screenshots in docs/):
   - 35 instrument chips load; real mp3 dropped via the file input; real conversion; the REAL gated-download error rendered as setup instructions (02-auth-path.png).
   - Library lists jobs; the example job reopens through the real SSE replay path: 4 lanes, 208 notes, duration 24 s (04-workspace.png).
-  - Stems rendered at 1.00 and 0.75, playback advances the playhead (0:01.2 -> 0:02.7), solo engages (05-solo-bass.png), loop arms ("Loop: 0.0s-14.8s"), rate 75% re-renders stems (06-loop-rate.png).
-  - Canvas painted (627k non-background pixels), MIDI export Content-Disposition correct, DELETE removes jobs.
+  - Stems rendered at 1.00 and 0.75, playback advances the playhead (0:01.2 -> 0:02.7), solo engages (05-solo-bass.png), loop arms ("Loop: 0.0s-14.8s"), rate 75% re-renders stems AND the original through atempo (06-loop-rate.png; originalBuffer 31.95 s for the 24 s take, audioCache ["1","0.75"]).
+  - Per-instrument MIDI export answers 200 audio/midi; canvas painted (627k non-background pixels); MIDI export Content-Disposition correct; DELETE removes jobs.
+  - Zero console exceptions across a full session after the review pass.
 
-Bugs found by driving and fixed: mixer id mismatch killed the workspace (`gainOriginal` vs `gainoriginal`), EventSource reconnect loop after terminal events, blocking fluidsynth/MuseScore calls inside async endpoints, no subprocess timeouts, native-quantize grid field not carried forward.
+Bugs found by driving and fixed: mixer id mismatch killed the workspace (`gainOriginal` vs `gainoriginal`), EventSource reconnect loop after terminal events, blocking fluidsynth/MuseScore calls inside async endpoints, no subprocess timeouts, native-quantize grid field not carried forward. Review-pass fixes and enhancements: atempo factor initially inverted (caught by the pitch test), slider fetch storm (debounced), header/markup injection via uploaded filenames (sanitized + escaped), Space double-firing on focused buttons, frozen clock after Library -> Practice, roll not relaying out on window resize, model cache thrashing on size ping-pong (LRU of 2), dead code removed (`onSourcesStopped`, inline instrument-order clone).
 
 ## Next steps for the owner (acceptance run, from the phone)
 
@@ -48,13 +49,13 @@ Bugs found by driving and fixed: mixer id mismatch killed the workspace (`gainOr
 
 ## Feature candidates for the next release (not in v1, deliberate)
 
-- Pitch-preserved slowdown of the ORIGINAL recording (ffmpeg `atempo` re-render or a small time-stretch), removing the one honest wart of the speed control.
 - "Minus one" export: render the mix minus soloed/muted instruments to WAV for playing along outside the browser.
-- Per-instrument MIDI download (stems exist server-side already; it is one more FileResponse).
 - Metronome click during looped playback (the grid is known when tempo detection succeeded).
 - Roll zoom (currently fixed fit-to-width with follow) and keyboard shortcuts beyond Space.
 - Upstream's auralization (stereo original-vs-synth check mix) as an export.
 - Swap the vendored `_sheets.py`/`midibridge` ports for upstream imports the day muscriptor ships them on PyPI (the code already prefers upstream when present; then delete the ports and the try/except).
+
+Done in the review pass instead of deferred: pitch-preserving slowdown of the original (ffmpeg atempo), per-instrument MIDI download, upload-filename sanitization, model-size LRU cache, slider debounce, resize-aware roll, delete confirmation, and the Space-key/mixer-button focus conflict.
 
 ## Known limitations (documented in README)
 

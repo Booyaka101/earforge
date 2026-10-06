@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Callable
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from muscriptor.tokenizer.mt3 import (
@@ -25,38 +25,37 @@ RATE_MIN, RATE_MAX = 0.5, 1.0
 
 
 class ModelManager:
-    """Loads TranscriptionModel lazily, one size at a time.
+    """Loads TranscriptionModel lazily, caching the two most recent sizes.
 
     Loading is the slow part (weights download/run) and happens inside the
     job worker so failures surface as job errors in the UI instead of killing
-    the server at startup.
+    the server at startup. Keeping two sizes cached means switching medium ->
+    large -> medium does not reload weights each time; VRAM stays bounded on
+    small GPUs because the third-newest is evicted.
     """
 
     def __init__(self, default_model: str, factory: Callable[[str], object] | None = None):
         self.default_model = default_model
         self._factory = factory
-        self._model = None
-        self._size: str | None = None
+        self._models: dict[str, object] = {}
         self._lock = threading.Lock()
 
     def get(self, size: str):
         with self._lock:
-            if self._size != size:
-                self._model = None
-                self._size = None
-                import torch
+            if size not in self._models:
+                if len(self._models) >= 2:
+                    self._models.pop(next(iter(self._models)))
+                    import torch
 
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-            if self._model is None:
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                 if self._factory is not None:
-                    self._model = self._factory(size)
+                    self._models[size] = self._factory(size)
                 else:
                     from muscriptor.transcription_model import TranscriptionModel
 
-                    self._model = TranscriptionModel.load_model(size)
-                self._size = size
-            return self._model
+                    self._models[size] = TranscriptionModel.load_model(size)
+            return self._models[size]
 
 
 class JobRun:
@@ -121,6 +120,18 @@ def _replay_file(path: Path):
             line = line.strip()
             if line:
                 yield _sse_line(json.loads(line))
+
+
+def _safe_name(filename: str | None) -> str:
+    """A filename safe to store, print, and put in a Content-Disposition.
+
+    Uploads carry whatever the client sent; quotes and newlines would break
+    the header, path bits and angle brackets have no business in a stored name.
+    """
+    name = Path(filename or "audio").name
+    for ch in '"\'\r\n<>&':
+        name = name.replace(ch, "_")
+    return name[:120] or "audio"
 
 
 def create_app(
@@ -289,8 +300,8 @@ def create_app(
         if not data:
             raise HTTPException(status_code=400, detail="uploaded file is empty")
 
-        job = lib.create_job(file.filename or "audio", size, resolved)
-        suffix = Path(file.filename or "").suffix or ".bin"
+        job = lib.create_job(_safe_name(file.filename), size, resolved)
+        suffix = Path(_safe_name(file.filename)).suffix or ".bin"
         upload_path = lib.job_dir(job["id"]) / f"upload{suffix}"
         upload_path.write_bytes(data)
 
@@ -360,11 +371,26 @@ def create_app(
         return {"ok": True}
 
     @app.get("/api/jobs/{job_id}/audio")
-    async def job_audio(job_id: str):
+    async def job_audio(job_id: str, rate: float = 1.0):
         get_job_or_404(job_id)
+        if not (RATE_MIN <= rate <= RATE_MAX):
+            raise HTTPException(
+                status_code=400,
+                detail=f"rate must be between {RATE_MIN} and {RATE_MAX}",
+            )
         path = lib.source_wav(job_id)
         if not path.exists():
             raise HTTPException(status_code=404, detail="no audio for this job")
+        if rate != 1.0:
+            stretched = lib.job_dir(job_id) / "audio_rates" / f"{rate:.2f}.wav"
+            if not stretched.exists():
+                try:
+                    await asyncio.to_thread(
+                        transcribe.render_audio_at_rate, path, rate, stretched
+                    )
+                except transcribe.TranscriptionError as e:
+                    raise HTTPException(status_code=503, detail=str(e)) from e
+            path = stretched
         return FileResponse(path, media_type="audio/wav")
 
     def job_notes(job_id: str) -> list[dict]:
@@ -437,6 +463,27 @@ def create_app(
             zip_path,
             media_type="application/zip",
             headers={"Content-Disposition": 'attachment; filename="sheets.zip"'},
+        )
+
+    @app.get("/api/jobs/{job_id}/export/stem/{instrument}.mid")
+    async def export_stem_midi(job_id: str, instrument: str):
+        """One instrument's notes as a standalone MIDI file (real times)."""
+        job = get_job_or_404(job_id)
+        notes = [n for n in job_notes(job_id) if n["instrument"] == instrument]
+        if not notes:
+            raise HTTPException(
+                status_code=404, detail=f"no notes for instrument '{instrument}'"
+            )
+        program, is_drums = synth.program_for(instrument)
+        midi = synth.stem_midi_bytes(notes, program, is_drums)
+        return Response(
+            content=midi,
+            media_type="audio/midi",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{_stem(job)} - {instrument}.mid"'
+                )
+            },
         )
 
     @app.get("/api/jobs/{job_id}/export/sheets")

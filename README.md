@@ -12,7 +12,7 @@ The point is the practice loop, not just the transcription: see the bass lane, s
 - Drag in any audio file ffmpeg can read (mp3, wav, flac, ogg, m4a, ...). It is converted to 32 kHz mono WAV before the model ever sees it, so container and codec problems cannot reach the model.
 - Notes stream into a canvas piano roll live, one colored lane per instrument, with bar lines when a tempo is detected.
 - Playback mixes the original audio with per-instrument stems synthesized through fluidsynth (MuseScore_General soundfont). Solo, mute, and a gain slider per instrument, plus a gain slider for the original.
-- A/B loop by dragging on the ruler. Speed from 50% to 100%.
+- A/B loop by dragging on the ruler. Speed from 50% to 100%, pitch preserved on every source: stems are re-rendered from scaled note times, the original through ffmpeg's atempo time-stretch.
 - Exports: the performance MIDI, the raw event stream as JSONL, and the engraved sheets tree (score.mid, score.musicxml, full_score.pdf, one PDF per instrument, tab PDFs for fretted instruments) as a zip.
 - Every transcription is kept in a local library (SQLite) with one-click reopen.
 - "Expected instruments" chips mask the model's vocabulary, so phantom instruments cannot be decoded at all.
@@ -124,7 +124,8 @@ Without MuseScore the button is hidden with an install hint, and the server refu
 ## How it works
 
 - The transcription pipeline mirrors muscriptor's own server: events stream out of `model.transcribe` as decoded (5-second chunks), then the MIDI is rebuilt with `events_to_midi_bytes`, so exported bytes match `muscriptor transcribe` output.
-- Stems are rendered per instrument by fluidsynth from a small per-instrument MIDI file. Speed changes re-render the stem with scaled note times, which is why stems keep their pitch and the original (played with `playbackRate`) does not.
+- Stems are rendered per instrument by fluidsynth from a small per-instrument MIDI file, and each mixer row has a `.mid` button to download that instrument's notes on their own.
+- Speed changes re-render every playback source at the chosen tempo: stems from scaled note times, the original recording through ffmpeg's `atempo` filter. Nothing is pitch-shifted, and all sources stay sample-aligned because they share the stretched timeline. Re-rendered audio is cached per speed, so scrubbing the slider back and forth is instant after the first pass.
 - Tempo detection runs strict and falls back visibly: rubato input gets a banner ("no steady tempo detected"), the transcription still completes, and exports carry no tempo or time signature.
 - The library is SQLite plus artifacts under `%LOCALAPPDATA%\earforge` (`~/.local/state/earforge` on Linux): one directory per job holding the converted WAV, the event log, both MIDI files, rendered stems, and engraved sheets.
 
@@ -135,7 +136,7 @@ Everything lives under `%LOCALAPPDATA%\earforge` (override with `EARFORGE_HOME`)
 ## Limitations
 
 - Transcription quality tracks MuScriptor itself: no velocity recovery (all notes play at one level), occasional wrong instruments on dense mixes (use the chips), and notably worse results on rubato playing.
-- Tempo 50-100% changes the original recording's pitch. The stems do not.
+- Slowdown uses ffmpeg's atempo for the original recording: a high-quality time-stretch, but still a DSP re-render, so a purist A/B at 50% may hear a difference against the untouched file.
 - One GPU transcription at a time; a second upload queues behind the first.
 - Only what ffmpeg reads; DRM-protected files are not supported.
 - The MuScriptor weights are CC BY-NC 4.0: this tool is for personal, non-commercial use, and you need the rights to the music you transcribe. earforge's own code is MIT.

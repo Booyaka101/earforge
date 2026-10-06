@@ -16,8 +16,9 @@
     es: null,
     file: null,
     stems: {},               /* instrument -> AudioBuffer (at player.rate) */
-    stemLoading: {},
     originalBuffer: null,
+    audioCache: {},          /* rate -> original AudioBuffer at that speed */
+    stemCache: {},           /* rate -> {instrument: AudioBuffer} */
     rate: 1,
     view: "upload",
   };
@@ -167,6 +168,8 @@
     state.jobMeta = null;
     state.stems = {};
     state.originalBuffer = null;
+    state.audioCache = {};
+    state.stemCache = {};
     state.rate = 1;
     $("rateSlider").value = 100;
     $("rateLabel").textContent = "100%";
@@ -277,7 +280,7 @@
     roll.setData(state.instruments, notes, state.duration, state.grid);
     buildMixer();
     wireTransport();
-    loadOriginal().then(function () { return loadStemsAt(state.rate); });
+    loadPlaybackAt(state.rate);
     tick();
   }
 
@@ -309,10 +312,12 @@
     function row(id, label, color, isOriginal) {
       var tr = tbody.insertRow();
       var dot = color ? "<span class='dot' style='background:" + color + "'></span>" : "<span class='dot' style='background:#8fa0b3'></span>";
+      var extra = isOriginal ? "" :
+        " <button class='small' id='mid" + CSS.escape(id) + "' title='download this instrument as MIDI'>.mid</button>";
       tr.innerHTML =
         "<td>" + dot + label + "<span class='laneSpin' id='spin" + CSS.escape(id) + "'></span></td>" +
         "<td><button class='small solo' id='solo" + CSS.escape(id) + "'>S</button> " +
-        "<button class='small mute' id='mute" + CSS.escape(id) + "'>M</button></td>" +
+        "<button class='small mute' id='mute" + CSS.escape(id) + "'>M</button>" + extra + "</td>" +
         "<td><input type='range' min='0' max='2' step='0.05' value='1' id='gain" + CSS.escape(id) + "'></td>";
     }
 
@@ -332,6 +337,11 @@
       $("gain" + CSS.escape(id)).oninput = function () {
         player.setChannels(channelState());
         player.updateGains();
+      };
+    });
+    state.instruments.forEach(function (inst) {
+      $("mid" + CSS.escape(inst)).onclick = function () {
+        download("/api/jobs/" + state.jobId + "/export/stem/" + encodeURIComponent(inst) + ".mid");
       };
     });
     player.setChannels(channelState());
@@ -357,7 +367,7 @@
       var pct = parseInt(this.value, 10);
       $("rateLabel").textContent = pct + "%";
       $("rateNote").textContent = pct < 100
-        ? "stems keep pitch; original drops like a slowed tape" : "";
+        ? "audio re-rendered, pitch kept" : "";
       changeRate(pct / 100);
     };
     roll.onSeek = function (t) { player.seek(t); roll.setPosition(t); };
@@ -386,7 +396,7 @@
   }
 
   function tick() {
-    if (state.view !== "workspace") return;
+    if (state.view !== "workspace") { rafId = 0; return; }
     var pos = player.position();
     roll.setPosition(pos);
     $("timeDisplay").textContent = fmtTime(pos) + " / " + fmtTime(state.duration);
@@ -396,56 +406,65 @@
 
   /* ---------- audio loading ---------- */
 
-  function loadOriginal() {
-    return global.fetch("/api/jobs/" + state.jobId + "/audio")
-      .then(function (r) { return r.arrayBuffer(); })
-      .then(function (buf) {
-        return new Promise(function (res, rej) {
-          var AC = global.AudioContext || global.webkitAudioContext;
-          var tmp = new AC();
-          tmp.decodeAudioData(buf, function (audio) { tmp.close(); res(audio); },
-            function (e) { tmp.close(); rej(e); });
-        });
-      })
-      .then(function (audio) {
-        state.originalBuffer = audio;
-        if (state.duration < audio.duration) state.duration = audio.duration;
-      })
-      .catch(function (e) {
-        banner("Could not load the original audio for playback: " + e, "warn");
-      });
+  function decodeBuffer(buf) {
+    return new Promise(function (res, rej) {
+      var AC = global.AudioContext || global.webkitAudioContext;
+      var tmp = new AC();
+      tmp.decodeAudioData(buf, function (audio) { tmp.close(); res(audio); },
+        function (e) { tmp.close(); rej(e); });
+    });
   }
 
-  function loadStemsAt(rate) {
-    if (!state.config || !state.config.fluidsynth) return Promise.resolve();
-    state.instruments.forEach(function (inst) {
-      $("spin" + CSS.escape(inst)).textContent = "rendering...";
-    });
-    var jobs = state.instruments.map(function (inst) {
-      return global.fetch("/api/jobs/" + state.jobId + "/stems/" + encodeURIComponent(inst) + "?rate=" + rate)
+  /* every playback source is fetched at the current speed: the original
+     through the server's pitch-preserving atempo render, stems from scaled
+     note times. Both are cached per rate so scrubbing the slider back is
+     instant. */
+  function loadPlaybackAt(rate) {
+    var jobs = [];
+
+    if (!state.audioCache[rate]) {
+      jobs.push(global.fetch("/api/jobs/" + state.jobId + "/audio" + (rate === 1 ? "" : "?rate=" + rate))
         .then(function (r) {
-          if (!r.ok) throw new Error(inst + ": " + r.status);
+          if (!r.ok) throw new Error("original audio: " + r.status);
           return r.arrayBuffer();
         })
-        .then(function (buf) {
-          return new Promise(function (res, rej) {
-            var AC = global.AudioContext || global.webkitAudioContext;
-            var tmp = new AC();
-            tmp.decodeAudioData(buf, function (audio) { tmp.close(); res([inst, audio]); },
-              function (e) { tmp.close(); rej(e); });
-          });
-        });
-    });
-    return Promise.all(jobs).then(function (pairs) {
-      var stems = {};
-      pairs.forEach(function (p) { stems[p[0]] = p[1]; });
-      state.stems = stems;
-      applyBuffers();
+        .then(decodeBuffer)
+        .then(function (audio) { state.audioCache[rate] = audio; }));
+    }
+
+    if (state.config && state.config.fluidsynth) {
       state.instruments.forEach(function (inst) {
-        $("spin" + CSS.escape(inst)).textContent = "";
+        $("spin" + CSS.escape(inst)).textContent =
+          rate === 1 ? "rendering..." : "re-rendering...";
       });
+      if (!state.stemCache[rate]) {
+        state.instruments.forEach(function (inst) {
+          jobs.push(global.fetch("/api/jobs/" + state.jobId + "/stems/" +
+            encodeURIComponent(inst) + "?rate=" + rate)
+            .then(function (r) {
+              if (!r.ok) throw new Error(inst + ": " + r.status);
+              return r.arrayBuffer();
+            })
+            .then(decodeBuffer)
+            .then(function (audio) { return [inst, audio]; }));
+        });
+      }
+    }
+
+    return Promise.all(jobs).then(function (results) {
+      if (!state.stemCache[rate]) {
+        var stems = {};
+        results.forEach(function (r) {
+          if (Array.isArray(r)) stems[r[0]] = r[1];
+        });
+        state.stemCache[rate] = stems;
+      }
+      state.originalBuffer = state.audioCache[rate];
+      state.stems = state.stemCache[rate];
+      applyBuffers();
     }).catch(function (e) {
-      banner("Stem rendering failed: " + e.message, "warn");
+      banner("Playback audio failed to load: " + (e.message || e), "warn");
+    }).then(function () {
       state.instruments.forEach(function (inst) {
         $("spin" + CSS.escape(inst)).textContent = "";
       });
@@ -461,17 +480,22 @@
     player.updateGains();
   }
 
+  /* dragging the slider fires one event per detent; render only once the
+     user settles, or every intermediate speed would be rendered server-side */
+  var rateTimer = null;
+
   function changeRate(rate) {
     state.rate = rate;
-    if (!state.config || !state.config.fluidsynth) {
-      /* no stems: only the original follows the slider */
+    if (rateTimer) global.clearTimeout(rateTimer);
+    var haveStems = !state.config || !state.config.fluidsynth ||
+      state.stemCache[rate];
+    if (state.audioCache[rate] && haveStems) {
+      state.originalBuffer = state.audioCache[rate];
+      state.stems = state.stemCache[rate] || {};
       applyBuffers();
       return;
     }
-    state.instruments.forEach(function (inst) {
-      $("spin" + CSS.escape(inst)).textContent = "re-rendering...";
-    });
-    loadStemsAt(rate);
+    rateTimer = global.setTimeout(function () { loadPlaybackAt(rate); }, 350);
   }
 
   /* ---------- exports ---------- */
@@ -511,6 +535,12 @@
 
   /* ---------- library ---------- */
 
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
   function loadLibrary() {
     global.fetch("/api/library").then(function (r) { return r.json(); }).then(function (d) {
       var list = $("libraryList");
@@ -530,9 +560,9 @@
         var insts = (job.instruments_found || []).map(pretty).join(", ") || "-";
         row.innerHTML =
           "<span class='status-dot " + dotCls + "'></span>" +
-          "<span class='name'>" + job.source_name + "</span>" +
-          "<span class='hint'>" + dur + " · " + insts + "</span>" +
-          "<span class='hint'>" + job.created_at.replace("T", " ") + "</span>";
+          "<span class='name'>" + escapeHtml(job.source_name) + "</span>" +
+          "<span class='hint'>" + dur + " · " + escapeHtml(insts) + "</span>" +
+          "<span class='hint'>" + escapeHtml(job.created_at.replace("T", " ")) + "</span>";
         row.onclick = function (e) {
           if (e.target.tagName === "BUTTON") return;
           reopenJob(job.id);
@@ -542,6 +572,7 @@
         del.textContent = "Delete";
         del.onclick = function (e) {
           e.stopPropagation();
+          if (!global.confirm("Delete '" + job.source_name + "' and all its artifacts?")) return;
           global.fetch("/api/jobs/" + job.id, { method: "DELETE" }).then(loadLibrary);
         };
         row.appendChild(del);
@@ -574,7 +605,12 @@
 
   /* ---------- tabs ---------- */
 
-  $("tabPractice").onclick = function () { switchView(state.jobId ? "workspace" : "upload"); };
+  $("tabPractice").onclick = function () {
+    switchView(state.jobId ? "workspace" : "upload");
+    /* the rAF clock stops when the workspace hides; restart it so the
+       playhead and time display track audio that kept playing */
+    if (state.view === "workspace" && !rafId) tick();
+  };
   $("tabLibrary").onclick = function () { switchView("library"); loadLibrary(); };
 
   /* ---------- boot ---------- */
@@ -583,7 +619,8 @@
 
   global.addEventListener("keydown", function (e) {
     if (state.view !== "workspace") return;
-    if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+    var tag = e.target.tagName;
+    if (tag === "INPUT" || tag === "SELECT" || tag === "BUTTON") return;
     if (e.code === "Space") { e.preventDefault(); togglePlay(); }
   });
 

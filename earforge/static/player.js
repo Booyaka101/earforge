@@ -2,10 +2,10 @@
    A/B loop, and 50-100% speed. All public times are RAW seconds (the
    transcription's own timeline); the stretched math stays internal.
 
-   Speed works differently per source on purpose. Stems are pre-rendered at
-   the chosen rate server-side (note times scaled, pitches untouched). The
-   original recording uses playbackRate, so it drops in pitch at slow speeds
-   like a slowed tape. */
+   Every playback source is pre-rendered server-side at the chosen speed:
+   stems from scaled note times (pitches untouched), the original through
+   ffmpeg's atempo (pitch preserved). All buffers therefore share the
+   stretched timeline, which is what keeps the sources sample-aligned. */
 (function (global) {
   "use strict";
 
@@ -23,7 +23,7 @@
   function Player() {
     this.ctx = null;
     this.master = null;
-    this.buffers = {};        /* id -> AudioBuffer; stems are rendered at this.rate */
+    this.buffers = {};        /* id -> AudioBuffer, all rendered at this.rate */
     this.gains = {};          /* id -> GainNode */
     this.channels = {};       /* id -> {gain, mute, solo} */
     this.rate = 1;
@@ -36,7 +36,6 @@
     this.nextTake = null;     /* {atCtx, fromRaw} scheduled ahead for looping */
     this.timer = null;
     this.onEnd = null;
-    this.onSourcesStopped = null;
   }
 
   Player.prototype._ensureCtx = function () {
@@ -69,8 +68,7 @@
   };
 
   Player.prototype.setBuffers = function (buffers, duration, rate) {
-    /* buffers: {id: AudioBuffer}; stems must be rendered at `rate`,
-       the original at 1.0 (playbackRate handles its speed). */
+    /* buffers: {id: AudioBuffer}, every one rendered at `rate` */
     var wasPlaying = this.playing;
     var pos = this.position();
     this.pause();
@@ -80,10 +78,6 @@
     if (wasPlaying) { this.seek(pos); this.play(); }
   };
 
-  Player.prototype._stretchedDuration = function () {
-    return this.duration / this.rate;
-  };
-
   Player.prototype._startTake = function (atCtx, fromRaw, spanRaw) {
     /* spanRaw: raw seconds this take covers before the loop point/end */
     for (var id in this.buffers) {
@@ -91,14 +85,8 @@
       var src = this.ctx.createBufferSource();
       src.buffer = buf;
       src.connect(this.gains[id]);
-      if (id === "original") {
-        src.playbackRate.value = this.rate;
-        var off = Math.min(fromRaw, Math.max(0, buf.duration / this.rate - 0.01));
-        src.start(atCtx, off);
-      } else {
-        var soff = Math.min(fromRaw / this.rate, Math.max(0, buf.duration - 0.01));
-        src.start(atCtx, soff);
-      }
+      var off = Math.min(fromRaw / this.rate, Math.max(0, buf.duration - 0.01));
+      src.start(atCtx, off);
       var stopAt = atCtx + spanRaw / this.rate;
       src.stop(stopAt);
       this.live.push({ src: src, stopAt: stopAt });
@@ -176,9 +164,8 @@
   Player.prototype.position = function () {
     /* raw seconds; frozen at the anchor while paused */
     if (!this.playing) return this.anchorPos;
-    var stretched = this.anchorPos / this.rate +
-      (this.ctx.currentTime - this.anchorCtxTime);
-    return Math.min(stretched * this.rate, this.duration);
+    var elapsed = (this.ctx.currentTime - this.anchorCtxTime) * this.rate;
+    return Math.min(this.anchorPos + elapsed, this.duration);
   };
 
   Player.prototype.seek = function (raw) {
@@ -200,8 +187,8 @@
   };
 
   Player.prototype.setRate = function (rate, buffersAtRate) {
-    /* buffersAtRate: replacement stem buffers rendered at `rate`
-       (original unchanged). Re-anchors at the current raw position. */
+    /* buffersAtRate: replacement buffers rendered at `rate`, original
+       included. Re-anchors at the current raw position. */
     var pos = this.position();
     var wasPlaying = this.playing;
     this.pause();

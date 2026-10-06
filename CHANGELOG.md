@@ -26,6 +26,12 @@ First release.
   %LOCALAPPDATA%/earforge.
 - Expected-instruments chips mask the model vocabulary through muscriptor's
   resolve_instrument_names, so phantom instruments cannot be decoded at all.
+- Speed control keeps pitch everywhere: stems re-render from scaled note
+  times, the original recording through ffmpeg's atempo. Per-speed audio is
+  cached server-side, and each mixer row can download its instrument as a
+  standalone MIDI file.
+- Uploaded filenames are sanitized before they reach storage, the library
+  page, or a Content-Disposition header.
 - Labelled examples (repo only, not in the wheel): a synthesized demo track
   and a seedable example job so the workspace can be tried before the model
   weights finish downloading.

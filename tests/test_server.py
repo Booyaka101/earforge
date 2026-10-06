@@ -152,6 +152,24 @@ def test_model_choice_reaches_factory(stub_home, tmp_path):
     assert sizes == ["large"]
 
 
+def test_model_cache_keeps_two_sizes_loaded(stub_home, tmp_path):
+    sizes = []
+
+    def factory(size):
+        sizes.append(size)
+        return StubModel()
+
+    client = _client_factory(stub_home, factory)
+    first = _post_audio(client, tmp_path, name="one.wav")
+    _wait_complete(client, first)
+    second = _post_audio(client, tmp_path, name="two.wav", model="large")
+    _wait_complete(client, second)
+    third = _post_audio(client, tmp_path, name="three.wav")
+    _wait_complete(client, third)
+    # medium -> large -> medium must not have reloaded medium
+    assert sizes == ["medium", "large"]
+
+
 def test_unknown_model_rejected(stub_home, tmp_path):
     client = _client(stub_home, StubModel())
     wav = make_wav(tmp_path / "x.wav", seconds=0.5)
@@ -281,6 +299,83 @@ def test_stem_rendering_real_fluidsynth(stub_home, tmp_path, tools_path):
     # invalid rate and unknown instrument are clean errors
     assert client.get(f"/api/jobs/{job_id}/stems/electric_bass?rate=0.3").status_code == 400
     assert client.get(f"/api/jobs/{job_id}/stems/oboe").status_code == 404
+
+
+def test_audio_at_rate_pitch_preserved_render(stub_home, tmp_path, tools_path):
+    """The original recording is slowed with ffmpeg atempo: longer, same pitch."""
+    stub = StubModel()
+    client = _client(stub_home, stub)
+    wav = make_wav(tmp_path / "song.wav", seconds=3.0)
+    r = client.post(
+        "/api/jobs", files={"file": ("song.wav", wav.read_bytes(), "audio/wav")}
+    )
+    job_id = r.json()["id"]
+    _wait_complete(client, job_id)
+
+    import io
+    import wave
+
+    full = client.get(f"/api/jobs/{job_id}/audio")
+    assert full.status_code == 200
+    with wave.open(io.BytesIO(full.content), "rb") as w:
+        full_s = w.getnframes() / w.getframerate()
+
+    slow = client.get(f"/api/jobs/{job_id}/audio?rate=0.75")
+    assert slow.status_code == 200
+    import numpy as np
+
+    with wave.open(io.BytesIO(slow.content), "rb") as w:
+        slow_s = w.getnframes() / w.getframerate()
+        frames = np.frombuffer(w.readframes(w.getnframes()), dtype=np.int16)
+    assert slow_s == pytest.approx(full_s / 0.75, rel=0.02)
+
+    # atempo keeps pitch: the 330 Hz tone stays at 330. A resample would
+    # move it to 0.75 x 330 = 247 Hz.
+    spectrum = np.abs(np.fft.rfft(frames.astype(float)))
+    freqs = np.fft.rfftfreq(len(frames), d=1.0 / 32000)
+
+    def band(hz, width=10):
+        mask = (freqs > hz - width) & (freqs < hz + width)
+        return spectrum[mask].max() if mask.any() else 0.0
+
+    assert band(330) > 5 * band(247)
+    assert band(330) > 5 * band(100)
+
+    # rate bounds enforced, unknown rate rejected
+    assert client.get(f"/api/jobs/{job_id}/audio?rate=0.3").status_code == 400
+    assert client.get(f"/api/jobs/{job_id}/audio?rate=1.5").status_code == 400
+
+
+def test_per_instrument_midi_export(stub_home, tmp_path):
+    stub = StubModel()
+    client = _client(stub_home, stub)
+    job_id = _post_audio(client, tmp_path)
+    _wait_complete(client, job_id)
+
+    r = client.get(f"/api/jobs/{job_id}/export/stem/electric_bass.mid")
+    assert r.status_code == 200
+    assert r.content[:4] == b"MThd"
+    assert "electric_bass" in r.headers["content-disposition"]
+    assert client.get(f"/api/jobs/{job_id}/export/stem/oboe.mid").status_code == 404
+
+
+def test_upload_filename_sanitized(stub_home, tmp_path):
+    """Quotes and path bits must not reach the DB or Content-Disposition."""
+    client = _client(stub_home, StubModel())
+    wav = make_wav(tmp_path / "x.wav", seconds=0.5)
+    r = client.post(
+        "/api/jobs",
+        files={"file": ('evil\\"<song>.mp3\r\n', wav.read_bytes(), "audio/wav")},
+        data={},
+    )
+    assert r.status_code == 200
+    job = client.get(f"/api/jobs/{r.json()['id']}").json()
+    assert '"' not in job["source_name"]
+    assert "<" not in job["source_name"]
+    assert "\r" not in job["source_name"]
+    midi = client.get(f"/api/jobs/{job['id']}/export/midi")
+    # a malformed header would raise or be stripped by the HTTP layer
+    assert midi.status_code in (200, 404)
 
 
 def test_ffmpeg_missing_gives_503(stub_home, tmp_path, monkeypatch):

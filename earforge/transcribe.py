@@ -87,6 +87,60 @@ def convert_audio(src: Path, dst: Path) -> float:
         return w.getnframes() / w.getframerate()
 
 
+def render_audio_at_rate(src: Path, rate: float, dst: Path) -> Path:
+    """Time-stretch a wav to 1/rate speed with pitch preserved (ffmpeg atempo).
+
+    This is what lets the original recording slow down with the synth stems
+    without dropping in pitch: every playback source is pre-rendered on the
+    stretched timeline. atempo's single-filter range covers our 0.5-1.0.
+    """
+    ffmpeg = ffmpeg_path()
+    if ffmpeg is None:
+        raise TranscriptionError(
+            "ffmpeg was not found on PATH, so speed control on the original"
+            " audio is unavailable. Install it from https://ffmpeg.org/download.html"
+        )
+    dst = Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.run(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(src),
+                "-filter:a",
+                f"atempo={rate:.6f}",
+                "-ac",
+                "1",
+                "-ar",
+                str(SAMPLE_RATE),
+                "-c:a",
+                "pcm_s16le",
+                str(dst),
+            ],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            creationflags=_NO_WINDOW,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise TranscriptionError(
+            f"ffmpeg timed out stretching '{Path(src).name}' to {rate:.0%}"
+        ) from e
+    if proc.returncode != 0 or not dst.exists():
+        detail = (proc.stderr or "").strip().splitlines()
+        hint = detail[-1] if detail else "no ffmpeg diagnostic output"
+        raise TranscriptionError(
+            f"ffmpeg could not slow '{Path(src).name}' to {rate:.0%}: {hint}"
+        )
+    return dst
+
+
 def event_to_dict(ev: NoteStartEvent | NoteEndEvent | ProgressEvent) -> dict:
     """The SSE/JSONL wire shape, matching muscriptor's own server."""
     if isinstance(ev, ProgressEvent):
@@ -129,10 +183,15 @@ def pair_events(event_dicts: list[dict]) -> list[dict]:
 
 
 def instruments_in(notes_or_events) -> list[str]:
-    """Instrument names in first-seen order (used for lane ordering)."""
+    """Instrument names in first-seen order (used for lane ordering).
+
+    Accepts event objects or wire dicts, whichever the caller happens to hold.
+    """
     seen: dict[str, None] = {}
     for ev in notes_or_events:
-        name = ev.get("instrument")
+        name = getattr(ev, "instrument", None)
+        if name is None and isinstance(ev, dict):
+            name = ev.get("instrument")
         if name:
             seen.setdefault(name, None)
     return list(seen)
@@ -195,10 +254,9 @@ def run_transcription(
         else None
     )
 
-    found = []
-    for ev in events:
-        if isinstance(ev, NoteStartEvent) and ev.instrument not in found:
-            found.append(ev.instrument)
+    found = instruments_in(
+        [ev for ev in events if isinstance(ev, NoteStartEvent)]
+    )
 
     return {
         "cancelled": False,
