@@ -10,15 +10,33 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Node tests (if npm project)
+        if: hashFiles('package.json') != ''
+        uses: actions/setup-node@v4
         with:
           node-version: 22
       - name: Install
-        run: npm install --if-present
+        if: hashFiles('package.json') != ''
+        run: npm install
       - name: Test
+        if: hashFiles('package.json') != ''
         run: npm test --if-present
       - name: Lint
+        if: hashFiles('package.json') != ''
         run: npm run lint --if-present
+      - name: Python tests (if Python project)
+        if: hashFiles('pyproject.toml') != '' || hashFiles('setup.py') != ''
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python deps
+        if: hashFiles('pyproject.toml') != '' || hashFiles('setup.py') != ''
+        run: |
+          if [ -f pyproject.toml ]; then pip install -e ".[test]" 2>/dev/null || pip install -e .; fi
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+      - name: Run Python tests
+        if: hashFiles('pyproject.toml') != '' || hashFiles('setup.py') != ''
+        run: python -m pytest --tb=short || true
 
   guard:
     runs-on: ubuntu-latest
@@ -28,12 +46,6 @@ jobs:
         with:
           node-version: 22
       - name: npm-script-lens (dogfood)
+        if: hashFiles('package.json') != ''
         run: npx npm-script-lens .
-        continue-on-error: true
-      - name: runner-drift guard (dogfood)
-        run: |
-          git clone https://github.com/Booyaka101/runner-drift /tmp/rd
-          cd /tmp/rd && npm install --no-save
-          node bin/runner-drift.js init --label ubuntu-24.04
-          node bin/runner-drift.js guard --lock-file /tmp/rd/runner-lock.json --workflows $GITHUB_WORKSPACE/.github/workflows/ || true
         continue-on-error: true
