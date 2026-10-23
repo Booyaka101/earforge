@@ -1,0 +1,63 @@
+import assert from 'node:assert/strict';
+import {appHarness, reply} from './app-harness.mjs';
+
+let pendingGrid, pendingUpload;
+let deferUpload = false;
+const h = await appHarness((url, options) => {
+    if (url === '/api/jobs') return deferUpload ? new Promise(resolve => { pendingUpload = resolve; }) : Promise.resolve(reply({id:'saved'}));
+    if (url.endsWith('/grid') || url.endsWith('/grid/reset')) {
+      return new Promise(resolve => { pendingGrid = {resolve, payload:JSON.parse(options.body)}; });
+    }
+});
+const {element, flush, state, emit} = h;
+state.file = new Blob(['audio']);
+element('goBtn').onclick();
+await flush();
+const detected = {bpm:100, beats_per_bar:4, first_downbeat:0, onset_delay:0, steady:true};
+emit({type:'job_start', duration_s:12});
+emit({type:'job_complete', instruments:[], export_revision:0, resolved_grid:detected});
+const initialBufferChanges = h.bufferChanges;
+const audio = {}, stems = {}, notes = state.notes;
+state.originalBuffer = audio;
+state.stems = stems;
+element('gridBpm').value = '120'; element('gridMeter').value = '4'; element('gridDownbeat').value = '2';
+element('gridForm').onsubmit({preventDefault(){}});
+assert.equal(state.gridSaving, true);
+assert.equal(element('gridSave').disabled, true);
+assert.equal(element('expMidi').disabled, true);
+assert.deepEqual(pendingGrid.payload, {expected_revision:0,bpm:120,beats_per_bar:4,first_downbeat:2});
+const saved = {status:'complete',export_revision:1,manual_grid:{bpm:120,beats_per_bar:4,first_downbeat:2},resolved_grid:{...detected,bpm:120,first_downbeat:2}};
+pendingGrid.resolve(reply(saved));
+await flush();
+assert.equal(state.exportRevision, 1);
+assert.equal(state.grid.first_downbeat, 2);
+assert.equal(state.originalBuffer, audio);
+assert.equal(state.stems, stems);
+assert.equal(state.notes, notes);
+assert.equal(h.bufferChanges, initialBufferChanges);
+assert.equal(element('gridSave').disabled, false);
+element('gridForm').onsubmit({preventDefault(){}});
+pendingGrid.resolve(reply({detail:'Grid changed in another tab. Reload the job.'}, false));
+await flush();
+assert.match(element('gridStatus').textContent, /Grid not saved.*another tab/);
+assert.equal(state.exportRevision, 1);
+assert.equal(state.gridSaving, false);
+state.es = h.stream;
+const entries = h.workspaceEntries;
+emit({type:'job_complete', instruments:[], export_revision:0,resolved_grid:detected});
+assert.equal(state.grid.bpm, 120);
+assert.equal(element('gridDownbeat').value, 2);
+assert.equal(h.workspaceEntries, entries);
+element('gridForm').onsubmit({preventDefault(){}});
+state.generation++; // A new workspace must reject even a same-job late response.
+pendingGrid.resolve(reply({...saved,export_revision:2}));
+await flush();
+assert.equal(state.exportRevision, 1);
+deferUpload = true;
+element('goBtn').onclick();
+state.generation++;
+const previousStream = h.stream;
+pendingUpload(reply({id:'late-upload'}));
+await flush();
+assert.equal(h.stream, previousStream);
+console.log('App grid wiring passed: progress, validation payload, preserved playback, errors, stale replay and late responses');

@@ -16,6 +16,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 _LOCK = threading.Lock()
+_JSON_FIELDS = ("instruments_requested", "instruments_found", "detected_grid", "manual_grid", "resolved_grid")
+_MIGRATIONS = {
+    "detected_grid": "TEXT", "manual_grid": "TEXT NOT NULL DEFAULT '{}'",
+    "resolved_grid": "TEXT", "first_downbeat": "REAL",
+    "export_revision": "INTEGER NOT NULL DEFAULT 0", "export_key": "TEXT",
+    "grid_origin": "TEXT",
+}
+
+
+class StaleRevision(ValueError):
+    """Another writer committed, or the job is no longer complete."""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -64,6 +75,34 @@ class Library:
     def init(self) -> None:
         with _LOCK, self._connect() as conn:
             conn.executescript(_SCHEMA)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}
+            for name, definition in _MIGRATIONS.items():
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+            # Old releases stored only a summary, not the tracked beat map.
+            # Recover the downbeat from the event log where possible; never
+            # invent tracked beats or modify the original event log/artifacts.
+            for row in conn.execute("SELECT * FROM jobs WHERE grid_origin IS NULL").fetchall():
+                downbeat = 0.0
+                path = self.library_root / row["id"] / "events.jsonl"
+                if path.exists():
+                    with path.open(encoding="utf-8") as stream:
+                        for line in stream:
+                            try:
+                                event = json.loads(line)
+                            except ValueError:
+                                continue
+                            if event.get("type") == "job_complete":
+                                downbeat = event.get("first_downbeat") or 0.0
+                grid = None if row["bpm"] is None else {
+                    "bpm": row["bpm"], "beats_per_bar": row["beats_per_bar"],
+                    "first_downbeat": downbeat, "onset_delay": row["onset_delay"],
+                    "beats": None, "beat_subdivision": None, "steady": True,
+                }
+                conn.execute(
+                    "UPDATE jobs SET detected_grid=?, resolved_grid=?, first_downbeat=?, grid_origin='legacy' WHERE id=?",
+                    (json.dumps(grid), json.dumps(grid), downbeat if grid else None, row["id"]),
+                )
 
     def job_dir(self, job_id: str) -> Path:
         d = self.library_root / job_id
@@ -77,11 +116,39 @@ class Library:
     def events_path(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "events.jsonl"
 
-    def midi_path(self, job_id: str) -> Path:
-        return self.job_dir(job_id) / "score.mid"
+    def export_dir(self, job: dict) -> Path:
+        base = self.job_dir(job["id"])
+        return base / "exports" / job["export_key"] if job.get("export_key") else base
 
-    def quantized_midi_path(self, job_id: str) -> Path:
-        return self.job_dir(job_id) / "score.quantized.mid"
+    def midi_path(self, job_id: str, job: dict | None = None) -> Path:
+        return self.export_dir(job or self.get_job(job_id) or {"id": job_id}) / "score.mid"
+
+    def quantized_midi_path(self, job_id: str, job: dict | None = None) -> Path:
+        return self.midi_path(job_id, job).with_name("score.quantized.mid")
+
+    def write_export(self, job_id: str, revision: int, midi: bytes, quantized: bytes) -> str:
+        key = f"r{revision}-{uuid.uuid4().hex}"
+        directory = self.job_dir(job_id) / "exports" / key
+        directory.mkdir(parents=True)
+        try:
+            (directory / "score.mid").write_bytes(midi)
+            (directory / "score.quantized.mid").write_bytes(quantized)
+        except Exception:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+        return key
+
+    def commit_grid(self, job_id: str, expected: int, **fields) -> None:
+        values = {k: json.dumps(v) if k in _JSON_FIELDS else v for k, v in fields.items()}
+        columns = ", ".join(f"{k} = :{k}" for k in values)
+        with _LOCK, self._connect() as conn:
+            changed = conn.execute(
+                f"UPDATE jobs SET {columns}, export_revision = export_revision + 1 "
+                "WHERE id = :id AND export_revision = :expected AND status = 'complete'",
+                {**values, "id": job_id, "expected": expected},
+            )
+            if changed.rowcount != 1:
+                raise StaleRevision("Grid changed in another tab. Reload the job before saving again.")
 
     def stems_dir(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "stems"
@@ -110,8 +177,8 @@ class Library:
     def sheets_dir(self, job_id: str) -> Path:
         return self.job_dir(job_id) / "sheets"
 
-    def sheets_zip(self, job_id: str) -> Path:
-        return self.job_dir(job_id) / "sheets.zip"
+    def sheets_zip(self, job_id: str, job: dict | None = None) -> Path:
+        return self.midi_path(job_id, job).with_name("sheets.zip")
 
     def create_job(self, source_name: str, model: str, instruments: list[str]) -> dict:
         job = {
@@ -128,13 +195,16 @@ class Library:
             "beats_per_bar": None,
             "onset_delay": None,
             "note_count": None,
+            "detected_grid": None, "resolved_grid": None, "manual_grid": {},
+            "first_downbeat": None, "export_revision": 0, "export_key": None,
+            "grid_origin": "detected",
         }
         with _LOCK, self._connect() as conn:
             conn.execute(
                 "INSERT INTO jobs (id, created_at, source_name, model,"
-                " instruments_requested, status)"
+                " instruments_requested, status, grid_origin)"
                 " VALUES (:id, :created_at, :source_name, :model,"
-                " :instruments_requested, :status)",
+                " :instruments_requested, :status, :grid_origin)",
                 {**job, "instruments_requested": json.dumps(instruments)},
             )
         self.job_dir(job["id"])
@@ -143,7 +213,7 @@ class Library:
     def update_job(self, job_id: str, **fields) -> None:
         if not fields:
             return
-        for name in ("instruments_requested", "instruments_found"):
+        for name in _JSON_FIELDS:
             if name in fields and not isinstance(fields[name], str):
                 fields[name] = json.dumps(fields[name])
         columns = ", ".join(f"{k} = :{k}" for k in fields)
@@ -176,6 +246,9 @@ class Library:
 
 def _row_to_job(row: sqlite3.Row) -> dict:
     job = dict(row)
-    job["instruments_requested"] = json.loads(job["instruments_requested"] or "[]")
-    job["instruments_found"] = json.loads(job["instruments_found"] or "[]")
+    for name in _JSON_FIELDS:
+        if job.get(name):
+            job[name] = json.loads(job[name])
+        else:
+            job[name] = {} if name == "manual_grid" else [] if name.startswith("instruments_") else None
     return job

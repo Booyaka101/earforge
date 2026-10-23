@@ -15,6 +15,7 @@ The point is the practice loop, not just the transcription: see the bass lane, s
 - A/B loop by dragging on the ruler. Speed from 50% to 100%, pitch preserved on every source: stems are re-rendered from scaled note times, the original through ffmpeg's atempo time-stretch.
 - Exports: the performance MIDI, the raw event stream as JSONL, one MIDI per instrument, and the engraved sheets tree (score.mid, score.musicxml, full_score.pdf, one PDF per instrument, tab PDFs for fretted instruments) as a zip.
 - Every transcription is kept in a local library (SQLite) with one-click reopen.
+- Saved BPM, meter and first-downbeat corrections regenerate MIDI from stored notes, without loading a model. Auto follows detected beats, including wandering tempo. Practice playback stays at the original note times.
 - "Expected instruments" chips mask the model's vocabulary, so phantom instruments cannot be decoded at all.
 
 ## Install
@@ -31,7 +32,7 @@ Three system programs are optional but each unlocks a feature. earforge tells yo
 |---|---|---|
 | [ffmpeg](https://ffmpeg.org/download.html) | decoding audio (required) | must be on PATH |
 | [fluidsynth](https://github.com/FluidSynth/fluidsynth/releases) | synthesized instrument stems | without it the roll still plays against the original audio |
-| [MuseScore 4+](https://musescore.org/en/download) | the sheets export | the button is hidden with an install hint without it |
+| [MuseScore 4+](https://musescore.org/en/download) | the sheets export | the button is disabled with an install hint without it |
 
 ### One-time model setup (free)
 
@@ -75,7 +76,39 @@ earforge library              # list past transcriptions in the terminal
 
 In the browser: drop a file, optionally tick the instruments you expect (masking a rock track down to guitars, bass and drums kills phantom harps), and watch the lanes fill in. Then practice: Space plays/pauses, drag on the ruler to loop, click anywhere to seek, S/M per lane to solo or mute.
 
-### A real example
+### Correct a saved musical grid (0.2.0)
+
+Open a completed job from Library. Set **BPM**, **Beats per bar (/4)** and
+**First downbeat (s)**, then **Save grid**. Blank fields keep detection; **Auto**
+clears the fields for the next save. **Reload saved** discards unsaved fields and
+fetches the latest saved grid, including after a two-tab conflict, without
+restarting playback. **Reset to detected** immediately restores
+the original detection. A typed BPM always selects constant tempo; Auto follows
+tracked beats when the detected tempo wanders. Unknown meter shows beat lines
+without invented bar numbers or a MIDI time signature.
+
+For 120 BPM, 4 beats per bar and first downbeat 2.0 s, bar lines are at 2.0,
+4.0, 6.0 s; beats are at 2.0, 2.5, 3.0, 3.5 s. With zero onset delay, a note at
+3.25 s still auditions at 3.25 s. MIDI timing is separate: MuScriptor subtracts
+the measured onset delay and may add whole-bar pickup headroom, recorded in
+`muscriptor:bar_offset=`. Grid edits never move audio, practice notes or loops.
+
+Corrections persist across reopen and restart. MIDI and per-instrument downloads
+use the saved grid; sheets must be engraved again for each revision. Two tabs
+cannot silently overwrite one another: a stale save returns 409 and asks you to
+reopen the job. A failed regeneration preserves the last successful exports.
+Only completed jobs can be corrected. Old 0.1.0 libraries migrate additively;
+their summary/downbeat is retained, but missing tracked beat maps cannot be
+reconstructed without running detection again. Reset on such jobs restores that
+legacy summary, not an invented map.
+
+API: `PUT /api/jobs/{id}/grid` accepts `expected_revision` plus nullable `bpm`
+(20-400), `beats_per_bar` (integer 1-32), and `first_downbeat` (0 to recording
+duration, at most 86400 seconds). `POST /api/jobs/{id}/grid/reset` accepts only
+`expected_revision`. Unknown fields, non-finite values and invalid types return
+422. Read the current revision and resolved/detected grids from `GET /api/jobs/{id}`.
+
+### Historical transcription example (0.1.0)
 
 A real run, driven in a real browser on Windows 11 + RTX 4090 (default medium model, 24 s 320 kbps MP3 of a multi-instrument demo track):
 
@@ -123,15 +156,16 @@ sheets.zip
 └── 03_drum_kit.pdf
 ```
 
-Without MuseScore the button is hidden with an install hint, and the server refuses the export with 503 and the same hint.
+Without MuseScore the button is disabled with an install hint, and the server refuses the export with 503 and the same hint.
 
 ## How it works
 
-- The transcription pipeline mirrors muscriptor's own server: events stream out of `model.transcribe` as decoded (5-second chunks), then the MIDI is rebuilt with `events_to_midi_bytes`, so exported bytes match `muscriptor transcribe` output.
+- Events stream out of `model.transcribe` as decoded. Initial and corrected MIDI share a model-free adapter to MuScriptor 0.4.0 `ExportOptions` and `notes_to_midi`, with GM programs from the existing synth mapping and drum sentinel 128.
 - Stems are rendered per instrument by fluidsynth from a small per-instrument MIDI file, and each mixer row has a `.mid` button to download that instrument's notes on their own.
 - Speed changes re-render every playback source at the chosen tempo: stems from scaled note times, the original recording through ffmpeg's `atempo` filter. Nothing is pitch-shifted, and all sources stay sample-aligned because they share the stretched timeline. Re-rendered audio is cached per speed, so scrubbing the slider back and forth is instant after the first pass.
-- Tempo detection runs strict and falls back visibly: rubato input gets a banner ("no steady tempo detected"), the transcription still completes, and exports carry no tempo or time signature.
+- Detection failure shows a banner and transcription still completes. Without detected or manual tempo, MIDI uses the upstream placeholder 120 BPM with no time signature, not a claimed detection. Detected wandering tempo is retained as a tempo map.
 - The library is SQLite plus artifacts under `%LOCALAPPDATA%\earforge` (`~/.local/state/earforge` on Linux): one directory per job holding the converted WAV, the event log, both MIDI files, rendered stems, and engraved sheets.
+- The original measured BeatGrid is stored separately from nullable manual options. Each successful save selects a complete immutable `exports/r<revision>-<key>/` bundle in a single SQLite compare-and-swap update. Prior bundles remain available to in-flight readers; audio and stem caches are independent.
 
 ## Configuration
 
@@ -157,14 +191,18 @@ Two small scripts under `examples/` (labelled example data, not part of the pack
 ```
 git clone https://github.com/Booyaka101/earforge
 cd earforge
-pip install -e . --no-deps && pip install muscriptor pytest httpx soundfile
+pip install -e . pytest httpx soundfile
 pytest -q                    # unit + server integration (skips what is missing)
 pytest -m gpu                # real model, needs CUDA + HF_TOKEN + EARFORGE_GPU=1
 ```
 
 The gpu test generates a 10 s click-and-scale WAV with numpy, transcribes it with the real model, and asserts at least one instrument, monotonic note times, and a valid MIDI header. Bundling ffmpeg/fluidsynth binaries under `tools/` (gitignored) puts them on PATH for the tests; the fluidsynth test also downloads the real MuseScore_General.sf2 (about 215 MB, once).
 
-Note that muscriptor's current PyPI release (0.3.x) is behind its repository: `write_sheets` and MIDI quantization exist upstream but not in the wheel. earforge prefers the upstream implementations when present and otherwise uses a port of upstream's MIT-licensed sheets module (`earforge/_sheets.py`) and an event-time quantizer (`earforge/midibridge.py`) that produce the same output; both go unused the moment a muscriptor release ships them.
+Earforge 0.2.0 pins the verified published `muscriptor==0.4.0`, corresponding to
+upstream commit `8a1ef88672cc23c26619adaff37ec48d82c0b906`. The 0.3 compatibility
+probe, event-time quantizer and vendored sheets implementation have been removed.
+Saving corrections requires no model weights, authentication or network access.
+The JS regression suites run through pytest using Node 22; GPU tests are opt-in.
 
 ## License
 

@@ -134,35 +134,6 @@ class StubModel:
 
         return BeatGrid(bpm=120.0, beats_per_bar=4, first_downbeat=0.0)
 
-    def events_to_midi_bytes(self, events, beat_grid=None, quantize=False):
-        from mido import Message, MidiFile, MidiTrack
-
-        midi = MidiFile(ticks_per_beat=480)
-        track = MidiTrack()
-        midi.tracks.append(track)
-        track.append(Message("program_change", channel=0, program=33, time=0))
-        open_notes = {}
-        for ev in events:
-            if type(ev).__name__ == "NoteStartEvent":
-                open_notes[ev.index] = ev
-                track.append(
-                    Message("note_on", channel=0, note=ev.pitch, velocity=100,
-                            time=int(ev.start_time * 960))
-                )
-            elif type(ev).__name__ == "NoteEndEvent":
-                start = open_notes.pop(ev.start_event_index, None)
-                if start is not None:
-                    track.append(
-                        Message("note_off", channel=0, note=start.pitch, velocity=0,
-                                time=int((ev.end_time - start.start_time) * 960))
-                    )
-        import io
-
-        buf = io.BytesIO()
-        midi.save(file=buf)
-        return buf.getvalue()
-
-
 def sse_events(text: str) -> list[dict]:
     """Parse an SSE body into its JSON payloads."""
     import json

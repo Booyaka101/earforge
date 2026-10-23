@@ -387,6 +387,38 @@ def test_empty_upload_rejected(stub_home):
     )
     assert r.status_code == 400
     assert "empty" in r.json()["detail"]
+    assert stub_home.list_jobs() == []
+    assert list(stub_home.library_root.iterdir()) == []
+
+
+def test_failed_upload_does_not_leave_a_running_job(stub_home, monkeypatch):
+    async def failed_read(self, size=-1):
+        raise OSError("simulated upload read failure")
+
+    monkeypatch.setattr("starlette.datastructures.UploadFile.read", failed_read)
+    client = _client(stub_home, StubModel())
+    with pytest.raises(OSError, match="simulated upload"):
+        client.post("/api/jobs", files={"file": ("broken.wav", b"audio", "audio/wav")})
+    assert stub_home.list_jobs() == []
+    assert list(stub_home.library_root.iterdir()) == []
+
+
+def test_unicode_download_filenames(stub_home, tmp_path):
+    from urllib.parse import quote
+
+    client = _client(stub_home, StubModel())
+    name = "日本語🎵.wav"
+    jid = _post_audio(client, tmp_path, name=name)
+    assert _wait_complete(client, jid)["status"] == "complete"
+    for endpoint, filename in [
+        ("midi", "日本語🎵.mid"),
+        ("jsonl", "日本語🎵.events.jsonl"),
+        ("stem/electric_bass.mid", "日本語🎵 - electric_bass.mid"),
+    ]:
+        response = client.get(f"/api/jobs/{jid}/export/{endpoint}")
+        assert response.status_code == 200
+        assert response.headers["content-disposition"] == "attachment; filename*=utf-8''" + quote(filename)
+        assert response.headers["cache-control"] == "no-store"
 
 
 def test_sheets_export_503_without_musescore(stub_home, tmp_path, monkeypatch):

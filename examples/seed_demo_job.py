@@ -10,10 +10,8 @@ transcription. Delete it from the Library tab when done.
     python examples/seed_demo_job.py
 """
 
-import io
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -21,42 +19,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from demo_score import BPM, BEATS_PER_BAR, DURATION, notes, write_wav  # noqa: E402
 
 from earforge.library import Library  # noqa: E402
+from earforge import midibridge  # noqa: E402
+from muscriptor.utils.beats import BeatGrid  # noqa: E402
 
 
 def _demo_midi(score: list[dict]) -> bytes:
-    """The score as a multi-instrument MIDI file (mido, one track per voice)."""
-    from mido import MidiFile, MidiTrack, Message, MetaMessage, bpm2tempo
-
-    programs = {
-        "electric_bass": (33, 0),
-        "clean_electric_guitar": (28, 1),
-        "organ": (19, 2),
-        "drums": (0, 9),
-    }
-    midi = MidiFile(ticks_per_beat=480)
-    by_inst: dict[str, list[dict]] = {}
-    for note in score:
-        by_inst.setdefault(note["instrument"], []).append(note)
-    for inst in ("electric_bass", "clean_electric_guitar", "organ", "drums"):
-        track = MidiTrack()
-        midi.tracks.append(track)
-        program, channel = programs[inst]
-        track.append(MetaMessage("set_tempo", tempo=bpm2tempo(BPM), time=0))
-        track.append(Message("program_change", channel=channel, program=program, time=0))
-        events = []
-        for note in by_inst.get(inst, []):
-            events.append((round(note["start_time"] * 960), note["pitch"], 1))
-            events.append((round(note["end_time"] * 960), note["pitch"], 0))
-        events.sort(key=lambda e: (e[0], e[2]))
-        now = 0
-        for tick, pitch, is_on in events:
-            track.append(Message(
-                "note_on" if is_on else "note_off", channel=channel,
-                note=pitch, velocity=100 if is_on else 0, time=tick - now))
-            now = tick
-    buf = io.BytesIO()
-    midi.save(file=buf)
-    return buf.getvalue()
+    return midibridge.midi_bytes(score, BeatGrid(BPM, BEATS_PER_BAR, 0, onset_delay=0))
 
 
 def main() -> None:
@@ -106,6 +74,9 @@ def main() -> None:
         jid, duration_s=DURATION, status="complete",
         instruments_found=instruments, bpm=BPM,
         beats_per_bar=BEATS_PER_BAR, onset_delay=0.0, note_count=len(score),
+        detected_grid=midibridge.grid_dict(BeatGrid(BPM, BEATS_PER_BAR, 0, onset_delay=0)),
+        first_downbeat=0.0,
+        resolved_grid=midibridge.grid_dict(BeatGrid(BPM, BEATS_PER_BAR, 0, onset_delay=0)),
     )
     print(f"done: {len(score)} notes, {len(instruments)} instruments, {DURATION:.0f}s")
     print("start earforge and open the Library tab to reopen it")

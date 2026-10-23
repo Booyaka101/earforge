@@ -1,5 +1,91 @@
 # earforge PROGRESS
 
+## 0.2.0 release preparation (2026-10-24)
+
+- Owner authorized tag, push, release and publication after review. Route: feature branch and PR, passing CI on the exact release commit, then annotated tag, GitHub release and PyPI upload. Do not bypass failed checks.
+- Release pass budget: at most 30 top-level tool calls or 30 minutes. Remaining questions: integrate the newer remote CI change, verify clean-environment hosted tests, validate built distributions, publish and verify matching public artifact hashes. Stop with a clear blocker if gates fail within the budget.
+- Confirmed the final cache-bypassing Chrome run passed against real job `4b02bb46548f`: 12 notes, acoustic guitar/drums, export revision 10, zero captured workflow errors. Includes Reload saved conflict recovery, pause/resume and loop tests. `.e2e/v020-review-result.json` records the successful result. Both refreshed screenshots visually inspected on release preparation.
+- Real MuseScore engraving remains unverified; this limitation must remain in the release notes. No new weight downloads or accounts are needed.
+
+## Additional review and enhancement loop (2026-10-23)
+
+- Completed bounded backend, frontend and playback review on the existing dirty branch. No commit, push, publication, new model run or weight download.
+- Reproduced and fixed Unicode attachment-header crashes and empty/failed-upload orphan jobs. Shared attachment headers now use RFC 5987 encoding; incomplete upload cleanup includes task cancellation.
+- Reproduced and fixed old-job audio/playhead retention, stale sheet downloads and controls re-enabled during grid saves, failed library opens, and duplicate zero-note workspace construction. Shared deferred-HTTP harness covers these paths.
+- Added **Reload saved** to resolve two-tab conflicts without resetting audio, caches, notes or playback position; documented the control.
+- Reproduced and fixed pause/resume counting paused time and loop look-ahead stopping live sources early. Queued takes no longer move the playhead early; delayed timers catch up to the current loop phase. Deterministic scheduler regressions pass.
+- Final full Python run: **106 passed, 1 skipped in 17.15s**. Explicit Node: **10 passed, 0 failed**. Clone scan: **53 functions / 1378 pairs**, no similarity >=0.80. `git diff --check` passes with line-ending warnings only.
+- Rebuilt and installed wheel passes `-I` package smoke with exact source/static bytes and model-free API/MIDI checks. SHA256: `2cfcbd5afd5ad533a474111e9e823e8a86f3c23284a1ea2040f770bd1fef3a70`. Existing dependency environment reused.
+- Browser script now supports `EARFORGE_E2E_JOB` to reuse a recorded real transcription and adds two-tab conflict recovery, pause/resume and loop checks. The first rerun lacked the bundled FluidSynth PATH. The corrected run passed grid/exports/conflict recovery/reopen but failed the resume assertion with an old cached player asset. The final cache-bypassing run **passed**, including pause/resume and looping, with zero captured workflow errors. `.e2e/v020-review-result.json` records the successful outcome.
+- Screenshots refreshed by browser checks. Real MuseScore engraving, fresh dependency installation and hosted Linux CI were still unverified at the end of this review. The original eight-point checklist and deferred features below apply subject to newer release evidence above.
+
+## 0.2.0 upgrade ledger (2026-10-23, local verification complete)
+
+- Branch: `feat/saved-musical-grid`, initially clean. No publication, push or model-weight download authorized or performed.
+- Phase 0 passed: live release/tag, MIDI source, beats source and PyPI 0.4.0 verified. Tag resolves to `8a1ef88672cc23c26619adaff37ec48d82c0b906`. Code MIT; optional weights CC BY-NC 4.0; no paid service needed for corrections.
+- Baseline: 67 passed, 1 GPU test skipped, both before and after installing the published MuScriptor 0.4.0 wheel. Dependency pinned to the verified version.
+- Inspected: project docs, requested Python/frontend code, tests, installed upstream MIDI (1-492), BeatGrid (1-400), Note (1-180). Verified drum sentinel 128 and non-idempotent grid resolution.
+- Implemented: original detected grid plus nullable manual options, additive migration, immutable revision-addressed MIDI bundles selected with SQLite compare-and-swap. Audio, stems and original event logs are not rewritten by corrections. Initial, corrected and per-instrument score MIDI share the model-free adapter; playback stays separate.
+- Completed the three bounded passes: implementation, regression/browser verification, final review/packaging. No delegation, push, PR creation, merge, release, account creation or gated-weight download. Changes remain uncommitted on `feat/saved-musical-grid`.
+
+### Final evidence
+
+- Full suite: `python -m pytest -q --tb=short` -> **103 passed, 1 skipped in 16.20s**. Includes every `tests/js/*.test.mjs` suite through pytest.
+- Explicit Node run: `node --test tests/js/*.test.mjs` -> **4 passed, 0 failed** (app wiring, grid, mixer, player).
+- Cached real GPU run with `EARFORGE_GPU=1 HF_HUB_OFFLINE=1`: `python -m pytest -q -m gpu --tb=short` -> **1 passed, 103 deselected in 4.32s**. No weight download.
+- Real Chrome/CDP E2E against the local server with a real 12-second upload: job `4b02bb46548f`, 12 notes, acoustic guitar and drums. Tested playback while saving, 120 BPM / 4 / 2.0 s ruler, unchanged audio/stem buffer and cache identities and note times, solo, byte-identical repeated exports, stale 409, library reopen, Auto/reset, MIDI/JSONL/per-instrument downloads, and sheets' missing-tool response. Zero captured workflow browser errors; listeners are installed after navigation, so this is not a claim to capture every boot-time exception.
+- Fresh screenshots visually inspected: `docs/14-saved-grid.png` and `docs/15-reset-grid.png`.
+- `difflib.SequenceMatcher` scan: 52 functions of at least 13 lines, 1326 pairs, **no matches at or above 0.80**. Python AST plus bounded JS function extraction; not a proof that every short fragment is unique. Local details: `.e2e/v020-similarity.json`.
+- Installed MuScriptor wheel's `midi.py` and `beats.py` match the pinned upstream commit byte-for-byte after CRLF normalization. SHA256: `42b9565d1f965a6102d9f3befdc778afca4554e958c9e047382552842e3aded2` and `463cdfabc65a7fe2b2a0d2437f3bcfee9c0f6412a126375ffac3b3fb7de98c4f`.
+- Built `.e2e/v020-dist/earforge-0.2.0-py3-none-any.whl`; SHA256 `b987ca2a3515fc14396988b4d62913d8000bcede1434eeef9f3002dd4f9cdf1a`. Installed with `--no-deps --target .e2e/v020-clean`; isolated-path smoke checked exact source/static bytes, version/config, static routes, model-free correction API and MIDI download. This reused the existing dependency environment, not a fresh full dependency installation. An initial `--no-isolation` build lacked hatchling; the standard isolated build succeeded without changing runtime dependencies.
+- Final review caught and fixed a reproduced stale-completion workspace rebuild, late upload/audio/save/stream response hazards, solo/mute button-state reading, and HTTP cache reuse for revision-dependent exports. Regression tests cover these bounded paths. Earlier review added strict/nonfinite validation, SQLite rollback handling, truthful placeholder-tempo messaging, and a legacy-summary UI hint.
+- `git diff --check` passed (line-ending warnings only). All source and tests remain local, including the new untracked files. No hosted CI has run.
+- Cleanup: stopped only the recorded project server and launcher (PIDs 42356 and 34432); no listener remained on test port 8418. Unrelated processes and browser tabs were left alone.
+
+Actual E2E output:
+
+```text
+REAL TRANSCRIPTION: {"notes":12,"instruments":["acoustic_guitar","drums"]}
+BROWSER E2E PASS: real upload/transcription/playback, 120 BPM / 4 / 2s grid, unchanged buffers/notes, solo, repeated save, stale 409, reopen, Auto, reset, exports; 0 browser errors.
+SHEETS: real engraving unavailable; 503 install hint verified
+```
+
+### Eight-point acceptance checklist
+
+1. **PASS**: upstream release/tag/source/PyPI and free/local cost model verified; `muscriptor==0.4.0` pinned.
+2. **PASS**: shared model-free `ExportOptions` / `notes_to_midi` adapter, existing GM mapping and drum sentinel 128; obsolete bridge/port removed.
+3. **PASS**: additive migration; immutable original grid, nullable manual settings, resolved metadata and export revision persist. Legacy missing beat maps are not fabricated.
+4. **PASS**: validated job-scoped save/reset, stale revision rejection, generate-before-commit bundles, failure cleanup and concurrency coverage.
+5. **PASS**: current full/per-instrument MIDI and revision-specific sheets selection; audio/stem caches and original notes remain unchanged.
+6. **PASS**: BPM/meter/downbeat controls, Auto/reset, progress/errors, reopen persistence, stale replay/late-response protection, tracked tempo and nullable meter.
+7. **PASS**: worked timing example, onset-delay/pickup distinction, model-free regressions, full Python/JS suites, cached GPU run, real browser and fresh screenshots.
+8. **PARTIAL**: 0.2.0 docs/version and rebuilt-wheel smoke pass. Real MuseScore engraving, fully fresh dependency installation and hosted CI on an exact committed revision remain unverified. Nothing published.
+
+### WHAT DID WE MISS
+
+- Real MusicXML/PDF/tab engraving cannot be validated without MuseScore 4. Fake-writer tests validate revision selection, packing and concurrent saves, not engraving quality.
+- Hosted Linux CI and a fresh dependency solve/install have not run. Local checks used Windows and existing dependencies.
+- This browser acceptance take is short. Historical long-file runs remain evidence for 0.1.0, not a new 0.2.0 long-file acceptance claim.
+- Old successful export bundles intentionally accumulate to protect in-flight readers. Crash-orphaned, unselected bundles also have no garbage collector.
+
+### WHAT FEATURES ARE MISSING
+
+- Export-history/undo UI and safe bundle pruning.
+- Advanced upstream export controls (beat scaling, subdivision/strength, gap filling and leading-bar trimming), arbitrary meter denominators and manual tempo-map editing.
+- Deferred practice features: metronome, minus-one audio export and roll zoom.
+
+### Local PR handoff and remaining work
+
+- Suggested title: **Add persistent musical-grid corrections and model-free MIDI re-export (0.2.0)**.
+- Summary: pin MuScriptor 0.4.0; replace the legacy export bridge; persist original/manual/resolved grids; atomically select revisioned exports; add correction controls without changing audition timing; add migration, failure, concurrency, JS and browser coverage.
+- Review files with `git status --short` (ordinary `git diff --stat` omits new untracked files). Commit only this task's files, then push/open a PR when authorized. Do not release before CI passes on the exact commit.
+- Optional owner step: install MuseScore 4, engrave a corrected job, change its grid and verify regenerated full score, MusicXML and instrument/tab PDFs.
+- Remaining release checks: fresh dependency installation, hosted CI on the final commit, owner review and release approval. No merge/publication was performed.
+
+## Historical 0.1.0 record
+
+The 0.1.0 notes below are historical. Their no-token/no-real-model and pitch-changing limitations were superseded by the recorded real-model run and pitch-preserving atempo implementation. The release is already published; the old owner push instructions are obsolete. MuseScore availability must be rechecked for this upgrade.
+
 Local, GPU-accelerated learn-by-ear workbench on top of muscriptor. **SHIPPED 2026-10-06: github.com/Booyaka101/earforge (tag v0.1.0, release with wheel attached) and pypi.org/project/earforge/0.1.0.** Verified installed from PyPI into a fresh venv (`pip install earforge` -> `earforge --version` -> 0.1.0).
 
 ## Phase 0 verification (2026-10-06, all live-fetched)

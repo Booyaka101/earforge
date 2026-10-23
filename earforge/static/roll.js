@@ -23,7 +23,7 @@
     this.instruments = [];
     this.notes = [];          /* [{instrument, pitch, start_time, end_time, index}] */
     this.duration = 0;
-    this.grid = null;         /* {bpm, beatsPerBar, firstDownbeat} or null */
+    this.grid = null;         /* resolved BeatGrid in original recording seconds */
     this.loop = null;         /* {a, b} raw seconds */
     this.dragStart = null;
     this.onSeek = null;
@@ -144,15 +144,14 @@
       ctx.strokeStyle = "#1c2530";
       ctx.beginPath(); ctx.moveTo(x, RULER_H); ctx.lineTo(x, h); ctx.stroke();
     }
-    if (this.grid && this.grid.beatsPerBar) {
-      var beat = 60 / this.grid.bpm, bar = beat * this.grid.beatsPerBar;
+    if (this.grid) {
       ctx.fillStyle = "#54677c";
-      for (var b = Math.max(0, this.grid.firstDownbeat); b < this.duration + 4; b += bar) {
-        var bx = b * this.pxPerSec;
-        ctx.fillText(String(Math.round((b - this.grid.firstDownbeat) / bar) + 1), bx + 2, 23);
-        ctx.strokeStyle = "#33414f";
+      global.EarforgeGrid.lines(this.grid, this.duration + 4).forEach(function (line) {
+        var bx = line.time * this.pxPerSec;
+        if (line.bar != null) ctx.fillText(String(line.bar), bx + 2, 23);
+        ctx.strokeStyle = line.bar != null ? "#33414f" : "#202d39";
         ctx.beginPath(); ctx.moveTo(bx, RULER_H); ctx.lineTo(bx, h); ctx.stroke();
-      }
+      }, this);
     }
 
     /* lanes */
@@ -245,6 +244,9 @@
   };
 
   Roll.prototype.setLoop = function (loop) { this.loop = loop; this.draw(); };
+  Roll.prototype.setGrid = function (grid) {
+    this.grid = grid; this._layerDirty = true; this.draw();
+  };
 
   global.Roll = Roll;
   global.rollPalette = PALETTE;

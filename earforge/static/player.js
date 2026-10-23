@@ -33,7 +33,7 @@
     this.anchorCtxTime = 0;   /* ctx time when the current take started */
     this.anchorPos = 0;       /* raw position of the take start */
     this.live = [];           /* sources of the current+next take */
-    this.nextTake = null;     /* {atCtx, fromRaw} scheduled ahead for looping */
+    this.nextTake = null;     /* {atCtx, fromRaw} next unscheduled loop take */
     this.timer = null;
     this.onEnd = null;
   }
@@ -100,8 +100,6 @@
       src.stop(stopAt);
       this.live.push({ src: src, stopAt: stopAt });
     }
-    this.anchorCtxTime = atCtx;
-    this.anchorPos = fromRaw;
   };
 
   Player.prototype._cleanupLive = function () {
@@ -116,14 +114,20 @@
   Player.prototype.play = function () {
     if (this.playing || !this.buffers.original && !Object.keys(this.buffers).length) return;
     this._ensureCtx();
-    this.playing = true;
     var pos = this.position();
     if (pos >= this.duration - 0.05) pos = this.loop ? this.loop.a : 0;
+    if (this.loop && pos >= this.loop.b) pos = this.loop.a;
+    this.playing = true;
     this._scheduleTake(this.ctx.currentTime + 0.02, pos);
     this._startScheduler();
   };
 
-  Player.prototype._scheduleTake = function (atCtx, fromRaw) {
+  Player.prototype._scheduleTake = function (atCtx, fromRaw, queued) {
+    // Look-ahead must not move the audible playhead to a future take.
+    if (!queued) {
+      this.anchorCtxTime = atCtx;
+      this.anchorPos = fromRaw;
+    }
     var endRaw = this.loop ? Math.min(this.loop.b, this.duration) : this.duration;
     var spanRaw = Math.max(0.02, endRaw - fromRaw);
     this._startTake(atCtx, fromRaw, spanRaw);
@@ -152,11 +156,23 @@
     if (this.timer) global.clearInterval(this.timer);
     this.timer = global.setInterval(function () {
       if (!self.playing || !self.nextTake) return;
-      if (self.nextTake.atCtx <= self.ctx.currentTime + 0.45) {
+      var now = self.ctx.currentTime;
+      self.live = self.live.filter(function (entry) {
+        if (entry.stopAt > now) return true;
+        try { entry.src.disconnect(); } catch (e) { /* already disconnected */ }
+        return false;
+      });
+      while (self.nextTake && self.nextTake.atCtx <= now + 0.45) {
         var nt = self.nextTake;
         self.nextTake = null;
-        self._cleanupLive();
-        self._scheduleTake(nt.atCtx, nt.fromRaw);
+        if (nt.atCtx < now) {
+          // A throttled timer may miss entire loops. Resume at the audible phase.
+          var span = (self.loop.b - self.loop.a) / self.rate;
+          nt.atCtx += Math.floor((now - nt.atCtx) / span) * span;
+          nt.fromRaw += (now - nt.atCtx) * self.rate;
+          nt.atCtx = now;
+        }
+        self._scheduleTake(nt.atCtx, nt.fromRaw, true);
       }
     }, 150);
   };
@@ -173,8 +189,12 @@
   Player.prototype.position = function () {
     /* raw seconds; frozen at the anchor while paused */
     if (!this.playing) return this.anchorPos;
-    var elapsed = (this.ctx.currentTime - this.anchorCtxTime) * this.rate;
-    return Math.min(this.anchorPos + elapsed, this.duration);
+    var elapsed = Math.max(0, this.ctx.currentTime - this.anchorCtxTime) * this.rate;
+    var pos = this.anchorPos + elapsed;
+    if (this.loop && this.loop.b <= this.duration && pos >= this.loop.b) {
+      pos = this.loop.a + (pos - this.loop.b) % (this.loop.b - this.loop.a);
+    }
+    return Math.min(pos, this.duration);
   };
 
   Player.prototype.seek = function (raw) {
@@ -186,10 +206,11 @@
 
   Player.prototype.setLoop = function (loop) {
     /* raw seconds {a,b} or null; live-safe */
+    var wasPlaying = this.playing;
+    var pos = this.position();
+    this.pause();
     this.loop = loop;
-    if (this.playing) {
-      var pos = this.position();
-      this.pause();
+    if (wasPlaying) {
       this.seek(pos);
       this.play();
     }

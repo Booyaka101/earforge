@@ -10,6 +10,13 @@
     instruments: [],
     duration: 0,
     grid: null,
+    exportRevision: -1,
+    manualGrid: {},
+    jobStatus: null,
+    gridSaving: false,
+    sheetsExporting: false,
+    generation: 0,
+    gridOrigin: null,
     progress: null,
     firstProgressAt: 0,
     es: null,
@@ -80,12 +87,12 @@
     var cfg = state.config;
     if (!cfg) return;
     var btn = $("expSheets");
+    btn.textContent = state.sheetsExporting ? "Engraving..." : "Engrave + download sheets (zip)";
+    btn.disabled = !cfg.musescore || state.gridSaving || state.sheetsExporting || state.jobStatus !== "complete";
     if (cfg.musescore) {
-      btn.disabled = false;
       btn.title = "";
       $("sheetsHint").textContent = "";
     } else {
-      btn.disabled = true;
       btn.title = "Needs MuseScore 4+ installed (musescore.org/download). " +
         "Everything else works without it.";
       $("sheetsHint").textContent = "sheets need MuseScore 4+";
@@ -144,12 +151,15 @@
     $("progressBar").style.width = "0%";
     $("progressText").textContent = "converting audio...";
     resetWorkspace();
+    var generation = state.generation;
     global.fetch("/api/jobs", { method: "POST", body: fd }).then(function (r) {
       if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || r.statusText); });
       return r.json();
     }).then(function (d) {
+      if (state.generation !== generation) return;
       openJobStream(d.id, false);
     }).catch(function (e) {
+      if (state.generation !== generation) return;
       jobFailed("upload failed: " + e.message);
     });
   };
@@ -169,16 +179,28 @@
   }
 
   function resetWorkspace() {
+    state.generation++;
+    state.jobId = null;
+    if (rateTimer) { global.clearTimeout(rateTimer); rateTimer = null; }
     if (state.es) { state.es.close(); state.es = null; }
     if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
     player.pause();
     player.setLoop(null);
+    player.setBuffers({}, 0, 1);
+    player.seek(0);
+    player.setChannels({});
     roll.setLoop(null);
     state.notes = new Map();
     state.eventsSeen = new Set();
     state.instruments = [];
     state.duration = 0;
     state.grid = null;
+    state.exportRevision = -1;
+    state.manualGrid = {};
+    state.jobStatus = null;
+    state.gridOrigin = null;
+    state.gridSaving = false;
+    state.sheetsExporting = false;
     state.stems = {};
     state.originalBuffer = null;
     state.audioCache = {};
@@ -191,6 +213,7 @@
     $("rateLabel").textContent = "100%";
     $("rateNote").textContent = "";
     $("loopBtn").textContent = "Set loop: off";
+    updateSheetsButton();
   }
 
   /* ---------- SSE stream ---------- */
@@ -201,13 +224,14 @@
     state.es = es;
     var first = !replay;
     es.onmessage = function (m) {
+      if (state.jobId !== jobId || state.es !== es) { es.close(); return; }
       var ev;
       try { ev = JSON.parse(m.data); } catch (e) { return; }
       handleEvent(ev, first);
       first = false;
     };
     es.onerror = function () {
-      if (state.jobId !== jobId) { es.close(); return; }
+      if (state.jobId !== jobId || state.es !== es) { es.close(); return; }
       /* The stream ended. If a live run holds this job, this was a drop:
          let EventSource reconnect (replay + live; the UI dedupes). Anything
          else, a finished job or a worker that died mid-run, would loop
@@ -215,14 +239,15 @@
       global.fetch("/api/jobs/" + jobId)
         .then(function (r) { return r.json(); })
         .then(function (job) {
-          if (state.jobId !== jobId) { es.close(); return; }
+          if (state.jobId !== jobId || state.es !== es) { es.close(); return; }
           if (job.active) return;
           es.close();
           if (state.es === es) state.es = null;
           if (job.status === "error" && state.view === "upload") {
             jobFailed(job.error || "transcription failed");
-          } else if (state.notes.size > 0) {
+          } else if (state.notes.size > 0 || job.status === "complete" && job.note_count === 0) {
             state.duration = job.duration_s || state.duration;
+            applyGrid(job);
             if (job.instruments_found && job.instruments_found.length) {
               state.instruments = job.instruments_found;
             } else if (!state.instruments.length) {
@@ -285,10 +310,9 @@
         }
         break;
       case "job_complete":
+        if (!global.EarforgeGrid.acceptRevision(state.exportRevision, ev.export_revision)) break;
         state.instruments = ev.instruments || [];
-        state.grid = (ev.bpm != null) ? {
-          bpm: ev.bpm, beatsPerBar: ev.beats_per_bar, firstDownbeat: ev.first_downbeat || 0,
-        } : null;
+        applyGrid(Object.assign({ status: "complete" }, ev));
         state.noteCount = ev.note_count;
         enterWorkspace();
         closeStream();
@@ -321,9 +345,11 @@
       return a.start_time - b.start_time;
     });
     roll.setData(state.instruments, notes, state.duration, state.grid);
+    renderGridControls();
     buildMixer();
     wireTransport();
     loadPlaybackAt(state.rate);
+    if (rafId) cancelAnimationFrame(rafId);
     tick();
   }
 
@@ -331,15 +357,15 @@
     var channels = {
       original: {
         gain: parseFloat($("gain" + CSS.escape("original")).value),
-        mute: $("mute" + CSS.escape("original")).checked,
-        solo: $("solo" + CSS.escape("original")).checked,
+        mute: $("mute" + CSS.escape("original")).classList.contains("on"),
+        solo: $("solo" + CSS.escape("original")).classList.contains("on"),
       },
     };
     state.instruments.forEach(function (inst) {
       channels[inst] = {
         gain: parseFloat($("gain" + CSS.escape(inst)).value),
-        mute: $("mute" + CSS.escape(inst)).checked,
-        solo: $("solo" + CSS.escape(inst)).checked,
+        mute: $("mute" + CSS.escape(inst)).classList.contains("on"),
+        solo: $("solo" + CSS.escape(inst)).classList.contains("on"),
       };
     });
     return channels;
@@ -465,6 +491,7 @@
      while stems are still rendering; the stems join when they land. */
   function loadPlaybackAt(rate) {
     var jobs = [];
+    var generation = state.generation;
 
     if (!state.audioCache[rate]) {
       jobs.push(global.fetch("/api/jobs/" + state.jobId + "/audio" + (rate === 1 ? "" : "?rate=" + rate))
@@ -474,7 +501,9 @@
         })
         .then(decodeBuffer)
         .then(function (audio) {
+          if (state.generation !== generation) return;
           state.audioCache[rate] = audio;
+          if (rate !== state.rate) return;
           state.originalBuffer = audio;
           /* stems for this rate are not ready yet; playing none beats
              playing the previous rate's stems against the new original */
@@ -504,6 +533,7 @@
 
     return Promise.all(jobs)
       .then(function (results) {
+        if (state.generation !== generation) return;
         if (!state.stemCache[rate]) {
           var stems = {};
           results.forEach(function (r) {
@@ -511,11 +541,13 @@
           });
           state.stemCache[rate] = stems;
         }
+        if (rate !== state.rate) return;
         state.originalBuffer = state.audioCache[rate];
         state.stems = state.stemCache[rate];
         applyBuffers();
       })
       .catch(function (e) {
+        if (state.generation !== generation || rate !== state.rate) return;
         if (e && e.message && /original audio/.test(e.message)) {
           banner("Playback audio failed to load: " + e.message, "warn");
         } else {
@@ -523,6 +555,7 @@
         }
       })
       .then(function () {
+        if (state.generation !== generation || rate !== state.rate) return;
         state.instruments.forEach(function (inst) {
           $("spin" + CSS.escape(inst)).textContent = "";
         });
@@ -558,6 +591,88 @@
 
   /* ---------- exports ---------- */
 
+  function applyGrid(job) {
+    if (!global.EarforgeGrid.acceptRevision(state.exportRevision, job.export_revision)) return;
+    state.exportRevision = job.export_revision == null ? 0 : job.export_revision;
+    state.manualGrid = job.manual_grid || {};
+    state.grid = job.resolved_grid || null;
+    state.jobStatus = job.status;
+    state.gridOrigin = job.grid_origin;
+  }
+
+  var gridInputs = { bpm: "gridBpm", beats_per_bar: "gridMeter", first_downbeat: "gridDownbeat" };
+
+  function renderGridControls() {
+    Object.keys(gridInputs).forEach(function (key) {
+      $(gridInputs[key]).value = state.manualGrid[key] == null ? "" : state.manualGrid[key];
+    });
+    $("gridDownbeat").max = state.duration || 86400;
+    gridBusy(false);
+    var g = state.grid;
+    $("gridStatus").textContent = state.jobStatus !== "complete" ? "Corrections require a completed transcription." :
+      "Revision " + state.exportRevision + " · " + (g ?
+        g.bpm.toFixed(2) + " BPM" + (g.steady ? " (fixed)" : " average (tracked tempo)") +
+        " · " + (g.beats_per_bar == null ? "meter unknown" : g.beats_per_bar + "/4") +
+        " · downbeat " + g.first_downbeat.toFixed(3) + "s" : "No detected tempo; set BPM to add a grid.");
+    if (state.gridOrigin === "legacy") $("gridStatus").textContent += " · legacy summary (no tracked beat map)";
+  }
+
+  function gridBusy(busy) {
+    state.gridSaving = busy;
+    Object.values(gridInputs).concat(["gridSave", "gridAuto", "gridReset", "gridReload"]).forEach(function (id) {
+      $(id).disabled = busy || state.jobStatus !== "complete";
+    });
+    $("expMidi").disabled = busy;
+    state.instruments.forEach(function (inst) {
+      var button = $("mid" + CSS.escape(inst));
+      if (button) button.disabled = busy;
+    });
+    updateSheetsButton();
+  }
+
+  function requestGrid(url, options, message, failure) {
+    if (state.gridSaving || state.jobStatus !== "complete") return;
+    var id = state.jobId, generation = state.generation;
+    gridBusy(true);
+    $("gridStatus").textContent = message;
+    global.fetch(url, options).then(function (r) {
+      if (!r.ok) return r.json().then(function (e) {
+        throw new Error(typeof e.detail === "string" ? e.detail : JSON.stringify(e.detail));
+      });
+      return r.json();
+    }).then(function (job) {
+      if (state.jobId !== id || state.generation !== generation) return;
+      applyGrid(job);
+      roll.setGrid(state.grid);
+      renderGridControls();
+    }).catch(function (e) {
+      if (state.jobId !== id || state.generation !== generation) return;
+      gridBusy(false);
+      $("gridStatus").textContent = failure + ": " + e.message;
+    });
+  }
+
+  function saveGrid(reset) {
+    var payload = { expected_revision: state.exportRevision };
+    if (!reset) Object.keys(gridInputs).forEach(function (key) {
+      var value = $(gridInputs[key]).value;
+      payload[key] = value === "" ? null : Number(value);
+    });
+    requestGrid("/api/jobs/" + state.jobId + (reset ? "/grid/reset" : "/grid"), {
+      method: reset ? "POST" : "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    }, "Regenerating MIDI from saved notes...", "Grid not saved");
+  }
+
+  $("gridForm").onsubmit = function (e) { e.preventDefault(); saveGrid(false); };
+  $("gridAuto").onclick = function () {
+    Object.values(gridInputs).forEach(function (id) { $(id).value = ""; });
+    $("gridStatus").textContent = "Auto selected. Save grid to apply detection.";
+  };
+  $("gridReset").onclick = function () { saveGrid(true); };
+  $("gridReload").onclick = function () {
+    requestGrid("/api/jobs/" + state.jobId, undefined, "Loading saved grid...", "Could not reload grid");
+  };
+
   function download(url) {
     var a = document.createElement("a");
     a.href = url;
@@ -570,15 +685,21 @@
   $("expMidi").onclick = function () { download("/api/jobs/" + state.jobId + "/export/midi"); };
   $("expJsonl").onclick = function () { download("/api/jobs/" + state.jobId + "/export/jsonl"); };
   $("expSheets").onclick = function () {
-    var btn = $("expSheets");
-    btn.disabled = true;
-    btn.textContent = "Engraving...";
-    global.fetch("/api/jobs/" + state.jobId + "/export/sheets", { method: "POST" })
+    if ($("expSheets").disabled) return;
+    var id = state.jobId, generation = state.generation, revision = state.exportRevision;
+    function current() { return state.jobId === id && state.generation === generation; }
+    state.sheetsExporting = true;
+    updateSheetsButton();
+    global.fetch("/api/jobs/" + id + "/export/sheets", { method: "POST" })
       .then(function (r) {
         if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || r.statusText); });
         return r.blob();
       })
       .then(function (blob) {
+        if (!current()) return;
+        if (state.exportRevision !== revision || state.gridSaving) {
+          throw new Error("Grid changed or is being saved. Export sheets again.");
+        }
         var a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
         a.download = "sheets.zip";
@@ -587,8 +708,12 @@
         a.remove();
         URL.revokeObjectURL(a.href);
       })
-      .catch(function (e) { banner("Sheets export failed: " + e.message, "error"); })
-      .then(function () { btn.disabled = false; btn.textContent = "Engrave + download sheets (zip)"; });
+      .catch(function (e) { if (current()) banner("Sheets export failed: " + e.message, "error"); })
+      .then(function () {
+        if (!current()) return;
+        state.sheetsExporting = false;
+        updateSheetsButton();
+      });
   };
 
   /* ---------- library ---------- */
@@ -641,22 +766,26 @@
 
   function reopenJob(id) {
     resetWorkspace();
+    state.jobId = id;
+    var generation = state.generation;
     clearBanners();
-    global.fetch("/api/jobs/" + id).then(function (r) { return r.json(); }).then(function (job) {
+    global.fetch("/api/jobs/" + id).then(function (r) {
+      if (!r.ok) return r.json().then(function (e) { throw new Error(e.detail || r.statusText); });
+      return r.json();
+    }).then(function (job) {
+      if (state.generation !== generation) return;
       state.jobId = id;
       state.duration = job.duration_s || 0;
       state.instruments = job.instruments_found || [];
-      if (job.bpm != null) {
-        state.grid = { bpm: job.bpm, beatsPerBar: job.beats_per_bar, firstDownbeat: 0 };
-      }
+      applyGrid(job);
       /* replay the persisted event stream through the same SSE path;
          job_complete in it builds the workspace */
       openJobStream(id, true);
-      setTimeout(function () {
-        if (state.notes.size === 0 && job.note_count === 0) {
-          enterWorkspace();
-        }
-      }, 400);
+    }).catch(function (e) {
+      if (state.generation !== generation) return;
+      state.jobId = null;
+      switchView("library");
+      banner("Could not open job: " + e.message, "error");
     });
   }
 

@@ -2,11 +2,9 @@
 
 The worker mirrors muscriptor's own server: stream NoteStart/NoteEnd/Progress
 events out of ``model.transcribe`` while collecting them, then build the MIDI
-with ``model.events_to_midi_bytes`` so exported bytes are identical to what
-``muscriptor transcribe`` would have written.
+with MuScriptor's model-free notes writer, also used by saved-grid corrections.
 """
 
-import dataclasses
 import os
 import shutil
 import subprocess
@@ -275,21 +273,19 @@ def run_transcription(
                 "kind": "tempo_fallback",
                 "message": (
                     f"No steady tempo detected ({e}); transcription continued"
-                    " without a beat grid. Exports will have no tempo or time"
-                    " signature. Rubato recordings transcribe notably worse."
+                    " without a detected beat grid. MIDI uses placeholder"
+                    " 120 BPM with no time signature until you set a grid."
+                    " Rubato recordings transcribe notably worse."
                 ),
             }
         )
 
     starts = [ev.start_time for ev in events if isinstance(ev, NoteStartEvent)]
-    grid, subdivision = midibridge.measure_grid(grid, starts)
+    grid, _ = midibridge.measure_grid(grid, starts)
 
-    midi_bytes_ = midibridge.midi_bytes(model, events, grid)
-    quantized = (
-        midibridge.midi_bytes(model, events, grid, quantize=True, subdivision=subdivision)
-        if subdivision is not None
-        else None
-    )
+    notes = pair_events([event_to_dict(ev) for ev in events])
+    midi_bytes_ = midibridge.midi_bytes(notes, grid)
+    quantized = midibridge.midi_bytes(notes, grid, quantize=True)
 
     found = instruments_in(
         [ev for ev in events if isinstance(ev, NoteStartEvent)]
@@ -306,4 +302,6 @@ def run_transcription(
         "first_downbeat": grid.first_downbeat if grid else None,
         "onset_delay": grid.onset_delay if grid else None,
         "note_count": len(starts),
+        "detected_grid": midibridge.grid_dict(grid),
+        **midibridge.metadata(grid, {}, notes),
     }

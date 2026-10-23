@@ -25,7 +25,9 @@ pytestmark = [
 def _hf_auth_available() -> bool:
     if os.environ.get("HF_TOKEN"):
         return True
-    return (Path.home() / ".cache" / "huggingface" / "token").exists()
+    from huggingface_hub import constants
+
+    return Path(constants.HF_TOKEN_PATH).exists()
 
 
 pytestmark.append(
