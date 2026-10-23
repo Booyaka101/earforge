@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "earforge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local GPU-accelerated learn-by-ear workbench: any recording into multi-instrument MIDI, a live piano roll, and a play-along practice mixer, built on MuScriptor."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,8 +32,9 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio :: Analysis",
 ]
 dependencies = [
-    "muscriptor>=0.3",
+    "muscriptor==0.4.0",
     "fastapi>=0.110",
+    "pydantic>=2.0",
     "uvicorn>=0.29",
     "python-multipart>=0.0.9",
     "typer>=0.10",

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0 (2026-10-24)
+
+- Saved BPM, nullable meter and first-downbeat corrections, with Auto and reset.
+- Model-free MIDI regeneration from stored notes using MuScriptor 0.4.0's
+  `ExportOptions` and `notes_to_midi`; remove the obsolete 0.3 bridge and sheets port.
+- Additive library migration preserves detected grids, including tracked beats,
+  onset delay, subdivision and steady-tempo flag. Legacy jobs retain available
+  summaries without inventing beat maps.
+- Revision-checked saves select immutable MIDI bundles atomically. Failed or
+  stale saves preserve prior exports. Per-instrument MIDI uses the corrected
+  conductor/pickup; sheets caches are revision-specific and atomically packed.
+- Replay uses current saved grid metadata, not stale completion events. Piano
+  roll supports tracked tempo and unknown meter without changing audition times.
+- Fix solo/mute button state and wire CI to actual Python and Node tests.
+- Add Reload saved for stale-grid recovery without restarting playback.
+- Guard late sheet responses and failed library opens; clear old audio on job switches.
+- Fix pause/resume clock jumps and premature loop cutoffs during look-ahead.
+- Support Unicode download names and remove incomplete uploads from the library.
+
 ## 0.1.0 (2026-10-06)
 
 First release.

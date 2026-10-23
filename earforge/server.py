@@ -2,13 +2,19 @@
 
 import asyncio
 import json
+import math
+import sqlite3
 import threading
 from pathlib import Path
 from typing import Callable
+from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
 
 from muscriptor.soundfonts import SF2_URL
 from muscriptor.tokenizer.mt3 import (
@@ -17,12 +23,33 @@ from muscriptor.tokenizer.mt3 import (
 )
 from muscriptor.utils.download import ModelDownloadError, download_if_necessary
 
-from earforge import __version__, exports, synth, transcribe
-from earforge.library import Library
+from earforge import __version__, corrections, exports, midibridge, synth, transcribe
+from earforge.library import Library, StaleRevision
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 MODELS = ("small", "medium", "large")
 RATE_MIN, RATE_MAX = 0.5, 1.0
+
+
+class GridSave(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=0, strict=True)
+    bpm: float | None = Field(default=None, ge=20, le=400, allow_inf_nan=False, strict=True)
+    beats_per_bar: int | None = Field(default=None, ge=1, le=32, strict=True)
+    first_downbeat: float | None = Field(default=None, ge=0, le=86400, allow_inf_nan=False, strict=True)
+
+
+class GridReset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=0, strict=True)
+
+
+def completion(job):
+    return {"type": "job_complete", "instruments": job["instruments_found"],
+            **{k: job.get(k) for k in (
+                "bpm", "beats_per_bar", "first_downbeat", "onset_delay", "note_count",
+                "detected_grid", "resolved_grid", "manual_grid", "export_revision", "grid_origin",
+            )}}
 
 
 class ModelManager:
@@ -120,12 +147,15 @@ def _sse_line(obj: dict) -> str:
     return f"data: {json.dumps(obj)}\n\n"
 
 
-def _replay_file(path: Path):
+def _replay_file(path: Path, current=None):
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:
-                yield _sse_line(json.loads(line))
+                event = json.loads(line)
+                if event.get("type") == "job_complete" and current is not None:
+                    event = completion(current())
+                yield _sse_line(event)
 
 
 # CreateFile still maps these bare stems to devices on Windows, even with
@@ -153,6 +183,13 @@ def _safe_name(filename: str | None) -> str:
     return name[:120] or "audio"
 
 
+def _download_headers(filename: str) -> dict[str, str]:
+    encoded = quote(filename, safe="")
+    disposition = (f"attachment; filename*=utf-8''{encoded}" if encoded != filename
+                   else f'attachment; filename="{filename}"')
+    return {"Content-Disposition": disposition, "Cache-Control": "no-store"}
+
+
 def create_app(
     model: str = "medium",
     library: Library | None = None,
@@ -161,6 +198,16 @@ def create_app(
     if model not in MODELS:
         raise ValueError(f"unknown model {model!r}; expected one of {MODELS}")
     app = FastAPI(title="earforge")
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request, exc):
+        # NaN/Infinity are invalid inputs, but echoing them in FastAPI's
+        # default validation response would itself fail JSON serialization.
+        detail = jsonable_encoder(exc.errors(), custom_encoder={
+            float: lambda value: value if math.isfinite(value) else str(value),
+        })
+        return JSONResponse(status_code=422, content={"detail": detail})
+
     lib = library or Library()
     lib.init()
     models = ModelManager(model, model_factory)
@@ -207,7 +254,7 @@ def create_app(
         return FileResponse(
             path,
             media_type=media_type,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            headers=_download_headers(filename),
         )
 
     def fail(run: JobRun, job_id: str, message: str) -> None:
@@ -269,21 +316,7 @@ def create_app(
                 lib.update_job(job["id"], status="cancelled")
                 return
 
-            lib.midi_path(job["id"]).write_bytes(result["midi_bytes"])
-            if result["quantized_midi_bytes"] is not None:
-                lib.quantized_midi_path(job["id"]).write_bytes(
-                    result["quantized_midi_bytes"]
-                )
-            meta = {
-                "type": "job_complete",
-                "instruments": result["instruments"],
-                "bpm": result["bpm"],
-                "beats_per_bar": result["beats_per_bar"],
-                "first_downbeat": result["first_downbeat"],
-                "onset_delay": result["onset_delay"],
-                "note_count": result["note_count"],
-            }
-            run.emit(meta)
+            key = lib.write_export(job["id"], 0, result["midi_bytes"], result["quantized_midi_bytes"])
             lib.update_job(
                 job["id"],
                 status="complete",
@@ -292,7 +325,12 @@ def create_app(
                 beats_per_bar=result["beats_per_bar"],
                 onset_delay=result["onset_delay"],
                 note_count=result["note_count"],
+                first_downbeat=result["first_downbeat"],
+                detected_grid=result["detected_grid"],
+                resolved_grid=result["resolved_grid"],
+                export_key=key,
             )
+            run.emit(completion(lib.get_job(job["id"])))
         except transcribe.TranscriptionError as e:
             fail(run, job["id"], str(e))
         except Exception as e:  # noqa: BLE001 - the job boundary is the right place
@@ -369,15 +407,19 @@ def create_app(
         # stream to disk in chunks: a large upload must not be held in RAM
         data_size = 0
         upload_tmp = lib.job_dir(job["id"]) / f"upload{suffix}.part"
-        with open(upload_tmp, "wb") as sink:
-            while chunk := await file.read(8 * 1024 * 1024):
-                data_size += len(chunk)
-                sink.write(chunk)
-        if data_size == 0:
-            upload_tmp.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail="uploaded file is empty")
-        upload_path = lib.job_dir(job["id"]) / f"upload{suffix}"
-        upload_tmp.replace(upload_path)
+        try:
+            with open(upload_tmp, "wb") as sink:
+                while chunk := await file.read(8 * 1024 * 1024):
+                    data_size += len(chunk)
+                    sink.write(chunk)
+            if data_size == 0:
+                raise HTTPException(status_code=400, detail="uploaded file is empty")
+            upload_path = lib.job_dir(job["id"]) / f"upload{suffix}"
+            upload_tmp.replace(upload_path)
+        except BaseException:
+            # Include client/task cancellation before a worker owns this job.
+            lib.delete_job(job["id"])
+            raise
 
         run = JobRun(job, lib)
         with runs_lock:
@@ -409,7 +451,7 @@ def create_app(
             path = lib.events_path(job_id)
             if not path.exists():
                 raise HTTPException(status_code=404, detail="no events for this job")
-            gen = _replay_file(path)
+            gen = _replay_file(path, lambda: get_job_or_404(job_id))
         return StreamingResponse(
             gen,
             media_type="text/event-stream",
@@ -423,11 +465,34 @@ def create_app(
             job["active"] = job_id in runs
         job["artifacts"] = {
             "audio": lib.source_wav(job_id).exists(),
-            "midi": lib.midi_path(job_id).exists(),
+            "midi": lib.midi_path(job_id, job).exists(),
             "jsonl": lib.events_path(job_id).exists(),
-            "sheets": lib.sheets_zip(job_id).exists(),
+            "sheets": lib.sheets_zip(job_id, job).exists(),
         }
         return job
+
+    async def apply_grid(job_id, expected, manual):
+        job = get_job_or_404(job_id)
+        downbeat = manual.get("first_downbeat")
+        if downbeat is not None and job["duration_s"] is not None and downbeat > job["duration_s"]:
+            raise HTTPException(status_code=422, detail="first downbeat must lie within the recording")
+        try:
+            return await asyncio.to_thread(corrections.save_grid, lib, job, expected, manual)
+        except StaleRevision as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except (OSError, ValueError, RuntimeError, sqlite3.Error) as e:
+            raise HTTPException(status_code=500, detail=f"Could not regenerate MIDI; previous revision preserved: {e}") from e
+
+    @app.put("/api/jobs/{job_id}/grid")
+    async def save_grid(job_id: str, request: GridSave):
+        return await apply_grid(job_id, request.expected_revision, {
+            "bpm": request.bpm, "beats_per_bar": request.beats_per_bar,
+            "first_downbeat": request.first_downbeat,
+        })
+
+    @app.post("/api/jobs/{job_id}/grid/reset")
+    async def reset_grid(job_id: str, request: GridReset):
+        return await apply_grid(job_id, request.expected_revision, {})
 
     @app.get("/api/library")
     async def list_jobs():
@@ -474,12 +539,9 @@ def create_app(
 
     def job_notes(job_id: str) -> list[dict]:
         """All complete notes of a job, from its persisted event log."""
-        path = lib.events_path(job_id)
-        if not path.exists():
+        if not lib.events_path(job_id).exists():
             raise HTTPException(status_code=404, detail="no events for this job")
-        with open(path, encoding="utf-8") as f:
-            events = [json.loads(line) for line in f if line.strip()]
-        return transcribe.pair_events(events)
+        return corrections.stored_notes(lib, job_id)
 
     @app.get("/api/jobs/{job_id}/stems/{instrument}")
     async def job_stem(job_id: str, instrument: str, rate: float = 1.0):
@@ -525,7 +587,7 @@ def create_app(
     async def export_midi(job_id: str):
         job = get_job_or_404(job_id)
         return _artifact_response(
-            lib.midi_path(job_id), "no MIDI for this job",
+            lib.midi_path(job_id, job), "no MIDI for this job",
             "audio/midi", f"{_stem(job)}.mid",
         )
 
@@ -539,51 +601,49 @@ def create_app(
 
     @app.post("/api/jobs/{job_id}/export/sheets")
     async def export_sheets(job_id: str):
-        get_job_or_404(job_id)
-        midi = lib.midi_path(job_id)
+        job = get_job_or_404(job_id)
+        midi = lib.midi_path(job_id, job)
         if not midi.exists():
             raise HTTPException(status_code=404, detail="no MIDI for this job")
-        quantized = lib.quantized_midi_path(job_id)
+        quantized = lib.quantized_midi_path(job_id, job)
         try:
             zip_path = await asyncio.to_thread(
                 exports.export_sheets_zip,
                 midi.read_bytes(),
                 quantized.read_bytes() if quantized.exists() else None,
-                lib.job_dir(job_id),
+                lib.export_dir(job),
             )
         except exports.ExportError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
+        if get_job_or_404(job_id)["export_revision"] != job["export_revision"]:
+            raise HTTPException(status_code=409, detail="Grid changed while engraving. Export sheets again.")
         return FileResponse(
             zip_path,
             media_type="application/zip",
-            headers={"Content-Disposition": 'attachment; filename="sheets.zip"'},
+            headers=_download_headers("sheets.zip"),
         )
 
     @app.get("/api/jobs/{job_id}/export/stem/{instrument}.mid")
     async def export_stem_midi(job_id: str, instrument: str):
-        """One instrument's notes as a standalone MIDI file (real times)."""
+        """One instrument with the same corrected conductor and pickup as the score."""
         job = get_job_or_404(job_id)
         notes = [n for n in job_notes(job_id) if n["instrument"] == instrument]
         if not notes:
             raise HTTPException(
                 status_code=404, detail=f"no notes for instrument '{instrument}'"
             )
-        program, is_drums = synth.program_for(instrument)
-        midi = synth.stem_midi_bytes(notes, program, is_drums)
+        midi = await asyncio.to_thread(midibridge.midi_bytes, notes,
+                                      midibridge.grid_from_dict(job["detected_grid"]), job["manual_grid"])
         return Response(
             content=midi,
             media_type="audio/midi",
-            headers={
-                "Content-Disposition": (
-                    f'attachment; filename="{_stem(job)} - {instrument}.mid"'
-                )
-            },
+            headers=_download_headers(f"{_stem(job)} - {instrument}.mid"),
         )
 
     @app.get("/api/jobs/{job_id}/export/sheets")
     async def download_sheets(job_id: str):
-        get_job_or_404(job_id)
-        zip_path = lib.sheets_zip(job_id)
+        job = get_job_or_404(job_id)
+        zip_path = lib.sheets_zip(job_id, job)
         if not zip_path.exists():
             raise HTTPException(
                 status_code=404,
@@ -592,7 +652,7 @@ def create_app(
         return FileResponse(
             zip_path,
             media_type="application/zip",
-            headers={"Content-Disposition": 'attachment; filename="sheets.zip"'},
+            headers=_download_headers("sheets.zip"),
         )
 
     app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

@@ -3,9 +3,8 @@
 A stem is a plain WAV of one instrument's notes, synthesized from a small
 per-instrument MIDI file. Practice tempo works by scaling the note times
 before rendering: a slower stem is the same pitches with more space between
-them, so nothing is pitch-shifted. That is the one thing playbackRate on the
-original audio cannot do, and why the original audibly drops in pitch at
-reduced speed while the stems do not.
+them, so nothing is pitch-shifted. The original uses ffmpeg's atempo instead;
+neither playback path applies score-export grid corrections.
 """
 
 import shutil
@@ -20,7 +19,6 @@ from muscriptor.tokenizer.mt3 import MT3_FULL_PLUS_GROUP_NAMES
 from muscriptor.tokenizer.mt3 import get_group_program_map
 from muscriptor.utils.download import download_if_necessary
 
-from earforge.transcribe import pair_events
 
 _SAMPLE_RATE = 44100
 _TICKS_PER_SECOND = 960  # 480 ticks per beat at the 120 BPM default tempo

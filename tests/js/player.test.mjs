@@ -9,6 +9,9 @@ const { Player } = require("../../earforge/static/player.js");
 
 // the end-of-take watchdog polls with setTimeout; neutralize it so node exits
 global.setTimeout = (fn, ms) => 0;
+let scheduler;
+global.setInterval = fn => { scheduler = fn; return 1; };
+global.clearInterval = () => {};
 
 let now = 0;
 const scheduled = [];
@@ -71,6 +74,10 @@ p.ctx.currentTime = now;
 assert.ok(Math.abs(p.position() - 3) < 1e-9, "raw position tracks wall time");
 p.pause();
 assert.ok(Math.abs(p.position() - 3) < 1e-9, "frozen while paused");
+p.ctx.currentTime += 20;
+p.play();
+assert.ok(Math.abs(scheduled.at(-1).startOffset - 3) < 1e-9, "resume ignores elapsed paused time");
+p.pause();
 
 // ---------- 3. seek offset and stop time live in the stretched domain ----------
 p = makePlayer({ original: 32, bass: 32 }, 24, 0.75); // buffers stretched to 32s
@@ -107,4 +114,24 @@ assert.equal(p.gains.bass.gain.value, 1);
 p.setChannels({ original: { gain: 1, mute: false, solo: false } });
 assert.ok(!p.gains.bass, "old lane gain node removed");
 
-console.log("player: 10 assertions ok");
+// Look-ahead queues the next loop without stopping or re-anchoring this one.
+p = makePlayer({original:10}, 10, 1);
+p.loop = {a:2, b:4};
+scheduled.length = 0;
+p.playing = true;
+p._scheduleTake(now, 2);
+p._startScheduler();
+const current = scheduled[0];
+p.ctx.currentTime = now + 1.7;
+scheduler();
+assert.equal(current.stoppedAt, now + 2, "current loop plays to its scheduled end");
+assert.ok(Math.abs(p.position() - 3.7) < 1e-9, "look-ahead does not move the playhead early");
+p.ctx.currentTime = now + 2.1;
+scheduler();
+assert.ok(Math.abs(p.position() - 2.1) < 1e-9, "playhead wraps when the next loop actually starts");
+p.ctx.currentTime = now + 8.1;
+scheduler();
+assert.ok(Math.abs(p.position() - 2.1) < 1e-9, "scheduler catches up after a delayed timer");
+p.pause();
+
+console.log("player: playback, pause/resume, rate, seek, solo and gap-free loop assertions ok");

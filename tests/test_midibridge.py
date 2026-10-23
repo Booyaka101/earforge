@@ -1,113 +1,125 @@
-"""The MIDI compat bridge: quantize math and the native-path probe."""
+"""Actual published MuScriptor writer, without a model or weights."""
 
-import dataclasses
+import copy
+import io
 
+import mido
 import numpy as np
 import pytest
+from muscriptor.utils.beats import BeatGrid, read_bar_offset
 
 from earforge import midibridge
 
-from muscriptor.events import NoteEndEvent, NoteStartEvent
-from muscriptor.utils.beats import BeatGrid
+
+def note(start=3.25, instrument="electric_bass", pitch=40):
+    return dict(start_time=start, end_time=start + 0.25, instrument=instrument, pitch=pitch)
 
 
-class _OldModel:
-    """Signature of muscriptor 0.3.x: events_to_midi_bytes without quantize."""
-
-    def __init__(self):
-        self.seen = []
-
-    def events_to_midi_bytes(self, events, beat_grid=None):
-        self.seen = list(events)
-        return b"MThd-old"
+def read(data):
+    return mido.MidiFile(file=io.BytesIO(data))
 
 
-class _NewModel(_OldModel):
-    """Signature of muscriptor main: quantize parameter exists."""
-
-    def __init__(self):
-        super().__init__()
-        self.quantize = None
-
-    def events_to_midi_bytes(self, events, beat_grid=None, quantize=False):
-        self.quantize = quantize
-        return super().events_to_midi_bytes(events, beat_grid)
+def note_on_seconds(midi):
+    time = 0
+    result = []
+    for msg in midi:
+        time += msg.time
+        if msg.type == "note_on" and msg.velocity:
+            result.append(time)
+    return result
 
 
-def test_supports_quantize_probe():
-    assert midibridge.supports_quantize(_NewModel()) is True
-    assert midibridge.supports_quantize(_OldModel()) is False
-
-
-def _events_on_grid():
-    """Notes placed a hair late on an eighth-note grid (the onset-delay case)."""
-    events = []
-    lag = 0.012
-    index = 0
-    for k in range(48):
-        t = k * 0.25 + lag
-        start = NoteStartEvent(pitch=60, start_time=t, index=index, instrument="acoustic_piano")
-        events.append(start)
-        events.append(NoteEndEvent(end_time=t + 0.1, start_event=start))
-        index += 1
-    return events, lag
-
-
-def _steady_grid(bpm=120.0, beats_per_bar=4):
-    beats = np.arange(0.0, 48 * 0.25 + 1, 0.5)
-    return BeatGrid(bpm=bpm, beats_per_bar=beats_per_bar, first_downbeat=0.0, beats=beats)
+def test_roundtrip_all_grid_fields():
+    grid = BeatGrid(123, None, 2.0, beats=np.arange(20) * .5,
+                    onset_delay=.012, beat_subdivision=2, steady=False)
+    restored = midibridge.grid_from_dict(midibridge.grid_dict(grid))
+    assert midibridge.grid_dict(restored) == midibridge.grid_dict(grid)
+    assert isinstance(restored.beats, np.ndarray)
 
 
 def test_measure_grid_finds_delay_and_subdivision():
-    events, lag = _events_on_grid()
-    grid, subdivision = midibridge.measure_grid(_steady_grid(), [e.start_time for e in events if isinstance(e, NoteStartEvent)])
-    assert subdivision is not None
-    assert grid.onset_delay == pytest.approx(lag, abs=0.005)
+    grid = BeatGrid(120, 4, 0, beats=np.arange(26) * .5)
+    measured, subdivision = midibridge.measure_grid(grid, np.arange(48) * .25 + .012)
+    assert subdivision is not None and subdivision % 2 == 0
+    assert measured.onset_delay == pytest.approx(.012, abs=.005)
+    assert grid.onset_delay is None
 
 
 def test_measure_grid_without_beats_is_zero():
-    grid, subdivision = midibridge.measure_grid(
-        BeatGrid(bpm=120.0, beats_per_bar=4, first_downbeat=0.0), [0.1, 0.2]
-    )
+    grid, subdivision = midibridge.measure_grid(BeatGrid(120, 4, 0), [.1, .2])
     assert subdivision is None
-    assert grid.onset_delay == 0.0
+    assert grid.onset_delay == 0
 
 
-def test_quantize_on_old_model_snaps_onto_the_grid():
-    events, lag = _events_on_grid()
-    grid, subdivision = midibridge.measure_grid(
-        _steady_grid(), [e.start_time for e in events if isinstance(e, NoteStartEvent)]
-    )
-    model = _OldModel()
-    midibridge.midi_bytes(model, events, grid, quantize=True, subdivision=subdivision)
-
-    starts = [e for e in model.seen if isinstance(e, NoteStartEvent)]
-    step = 0.25  # 120 BPM, subdivision 2 -> eighth notes are 0.25 s
-    for s in starts:
-        # snapped to the grid in the raw timeline (delay folded back in)
-        assert abs((s.start_time - grid.onset_delay) / step
-                   - round((s.start_time - grid.onset_delay) / step)) < 1e-6
+def test_worked_example_does_not_retime_raw_notes():
+    notes = [note()]
+    before = copy.deepcopy(notes)
+    detected = BeatGrid(100, 3, .3, onset_delay=0)
+    manual = dict(bpm=120, beats_per_bar=4, first_downbeat=2.0)
+    metadata = midibridge.metadata(detected, manual, notes)
+    midi = read(midibridge.midi_bytes(notes, detected, manual))
+    assert metadata["first_downbeat"] == 2
+    assert note_on_seconds(midi) == pytest.approx([3.25], abs=.001)
+    assert read_bar_offset(midi) == 0
+    assert notes == before
+    assert detected.first_downbeat == .3
 
 
-def test_quantize_no_subdivision_is_noop():
-    events, _ = _events_on_grid()
-    grid = BeatGrid(bpm=120.0, beats_per_bar=4, first_downbeat=0.0, onset_delay=0.0)
-    model = _OldModel()
-    out = midibridge.midi_bytes(model, events, grid, quantize=True, subdivision=None)
-    assert out == b"MThd-old"
-    assert model.seen[0] is events[0]  # untouched
+def test_onset_delay_and_pickup_headroom_are_export_only():
+    notes = [note(.01), note(3.25)]
+    grid = BeatGrid(120, 4, .5, onset_delay=.02)
+    midi = read(midibridge.midi_bytes(notes, grid))
+    offset = read_bar_offset(midi)
+    assert offset == pytest.approx(1.5)
+    assert note_on_seconds(midi) == pytest.approx([.01 - .02 + offset, 3.25 - .02 + offset], abs=.001)
+    assert min(note_on_seconds(midi)) >= 0
+    assert notes[0]["start_time"] == .01
 
 
-def test_native_path_gets_quantize_flag():
-    events, _ = _events_on_grid()
-    model = _NewModel()
-    midibridge.midi_bytes(model, events, None, quantize=True, subdivision=2)
-    assert model.quantize is True
+def test_drums_have_own_sentinel_channel_and_named_track():
+    notes = [note(1), note(1, "drums", 36)]
+    converted, names = midibridge.to_notes(notes)
+    assert [n.program for n in converted] == [33, 128]
+    assert names == {33: "electric_bass", 128: "drums"}
+    midi = read(midibridge.midi_bytes(notes, None))
+    drum_track = next(t for t in midi.tracks if t.name == "drums")
+    assert {msg.channel for msg in drum_track if msg.type == "note_on"} == {9}
+    assert all(msg.channel != 9 for t in midi.tracks if t.name == "electric_bass" for msg in t if msg.type == "note_on")
 
 
-def test_snap_events_shortest_note_gets_a_full_step():
-    start = NoteStartEvent(pitch=60, start_time=0.24, index=0, instrument="organ")
-    events = [start, NoteEndEvent(end_time=0.26, start_event=start)]
-    snapped = midibridge.snap_events(events, delay=0.0, offset=0.0, step=0.25)
-    assert snapped[0].start_time == pytest.approx(0.25)
-    assert snapped[1].end_time == pytest.approx(0.5)
+@pytest.mark.parametrize("beats", [None, np.array([]), np.array([0.0])])
+def test_missing_short_beat_maps_are_safe(beats):
+    grid = BeatGrid(120, None, 0, beats=beats, onset_delay=0, steady=False)
+    midi = read(midibridge.midi_bytes([note()], grid))
+    assert note_on_seconds(midi) == pytest.approx([3.25], abs=.001)
+    assert not any(m.type == "time_signature" for t in midi.tracks for m in t)
+
+
+def test_auto_tempo_map_and_explicit_fixed_bpm():
+    beats = np.arange(24) * .4 + np.arange(24) ** 2 * .005
+    grid = BeatGrid(110, 4, 0, beats=beats, steady=False, onset_delay=0)
+    notes = [note(float(t)) for t in beats]
+    auto = read(midibridge.midi_bytes(notes, grid))
+    fixed = read(midibridge.midi_bytes(notes, grid, {"bpm": 120}))
+    assert sum(m.type == "set_tempo" for m in auto.tracks[0]) > 1
+    assert sum(m.type == "set_tempo" for m in fixed.tracks[0]) == 1
+    assert midibridge.metadata(grid, {}, notes)["resolved_grid"]["steady"] is False
+    assert midibridge.metadata(grid, {"bpm": 120}, notes)["resolved_grid"]["steady"] is True
+    assert np.array_equal(grid.beats, beats)
+
+
+def test_quantize_short_note_minimum_and_no_subdivision_noop():
+    notes = [dict(note(.24), end_time=.26)]
+    grid = BeatGrid(120, 4, 0, onset_delay=0, beat_subdivision=2)
+    midi = read(midibridge.midi_bytes(notes, grid, quantize=True))
+    assert note_on_seconds(midi) == pytest.approx([.25])
+    assert midi.length == pytest.approx(.5)
+    grid.beat_subdivision = None
+    assert midibridge.midi_bytes(notes, grid, quantize=True) == midibridge.midi_bytes(notes, grid)
+
+
+def test_no_detection_does_not_claim_placeholder_is_detected():
+    assert midibridge.metadata(None, {}, [note()])["resolved_grid"] is None
+    midi = read(midibridge.midi_bytes([note()], None))
+    assert not any(m.type == "time_signature" for t in midi.tracks for m in t)
+    assert midibridge.metadata(None, {"bpm": 120, "beats_per_bar": 4}, [note()])["bpm"] == 120

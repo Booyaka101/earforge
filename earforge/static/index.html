@@ -23,7 +23,7 @@
   header h1 { font-size: 17px; margin: 0; letter-spacing: 2px; }
   header h1 span { color: var(--accent); }
   header .spacer { flex: 1; }
-  select, button, input[type=text] {
+  select, button, input[type=text], input[type=number] {
     background: var(--panel2); color: var(--text); border: 1px solid var(--line);
     border-radius: 6px; padding: 6px 10px; font: inherit; cursor: pointer;
   }
@@ -78,6 +78,10 @@
   .st-run { background: var(--accent2); } .st-cxl { background: var(--dim); }
   .hidden { display: none !important; }
   .laneSpin { color: var(--dim); font-size: 11px; margin-left: 6px; }
+  .grid-controls { display: flex; gap: 12px; flex-wrap: wrap; align-items: end; }
+  .grid-controls label { display: flex; flex-direction: column; gap: 4px; }
+  .grid-controls input { width: 140px; }
+  #gridStatus { margin: 8px 0; }
 </style>
 </head>
 <body>
@@ -121,6 +125,20 @@
 
   <section id="viewWorkspace" class="hidden">
     <div class="card">
+      <h2 style="font-size:15px; margin-top:0">Musical grid</h2>
+      <form id="gridForm" class="grid-controls">
+        <label>BPM <input id="gridBpm" type="number" min="20" max="400" step="any" placeholder="Auto"></label>
+        <label>Beats per bar (/4) <input id="gridMeter" type="number" min="1" max="32" step="1" placeholder="Auto"></label>
+        <label>First downbeat (s) <input id="gridDownbeat" type="number" min="0" max="86400" step="any" placeholder="Auto"></label>
+        <button id="gridSave" type="submit" class="primary">Save grid</button>
+        <button id="gridAuto" type="button">Auto</button>
+        <button id="gridReset" type="button">Reset to detected</button>
+        <button id="gridReload" type="button" title="Discard unsaved fields and reload this job's latest saved grid without restarting playback">Reload saved</button>
+      </form>
+      <div id="gridStatus" class="hint" role="status" aria-live="polite"></div>
+      <div class="hint">Blank fields use detection. Auto clears the fields; Save applies them. Reset restores detection immediately. Reload saved discards unsaved fields and fetches the latest saved grid. Grid edits change MIDI and sheets, not audition timing. MIDI may add pickup headroom.</div>
+    </div>
+    <div class="card">
       <div class="transport">
         <button id="playBtn" class="primary" style="min-width:74px">Play</button>
         <span id="timeDisplay">0:00.0 / 0:00.0</span>
@@ -156,6 +174,7 @@
     </div>
   </section>
 </main>
+<script src="grid.js"></script>
 <script src="roll.js"></script>
 <script src="player.js"></script>
 <script src="app.js"></script>
